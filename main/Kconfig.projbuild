@@ -1,0 +1,114 @@
+menu "Smart-Buddy Configuration"
+
+    menu "Transport Layer"
+
+        config TRANSPORT_BLE_ENABLED
+            bool "Enable BLE (Nordic UART Service)"
+            default y
+            select BT_ENABLED
+            select BT_NIMBLE_ENABLED
+
+        config TRANSPORT_BLE_DEVICE_NAME
+            string "BLE Advertised Name"
+            default "SmartBuddy"
+            depends on TRANSPORT_BLE_ENABLED
+
+        config TRANSPORT_BLE_REQUIRE_BONDING
+            bool "Require BLE Secure Connection bonding"
+            default y
+            depends on TRANSPORT_BLE_ENABLED
+
+        config TRANSPORT_WS_ENABLED
+            bool "Enable Wi-Fi WebSocket transport"
+            default y
+
+        config TRANSPORT_WS_MODE_CLIENT
+            bool "WebSocket client mode (connect to server)"
+            default y
+            depends on TRANSPORT_WS_ENABLED
+
+        config TRANSPORT_WS_DEFAULT_URL
+            string "Default WebSocket server URL"
+            default "ws://192.168.1.100:8080/buddy"
+            depends on TRANSPORT_WS_ENABLED && TRANSPORT_WS_MODE_CLIENT
+
+        config TRANSPORT_WS_SERVER_PORT
+            int "WebSocket server listen port"
+            default 8080
+            depends on TRANSPORT_WS_ENABLED
+
+        config TRANSPORT_USB_ENABLED
+            bool "Enable USB CDC-ACM serial transport"
+            default y
+
+    endmenu
+
+    menu "Protocol Adapters"
+
+        config PROTO_OPENCLAW_ENABLED
+            bool "Enable OpenClaw protocol adapter"
+            default y
+
+        config PROTO_HERMES_ENABLED
+            bool "Enable Hermes protocol adapter"
+            default y
+
+        config PROTO_DEFAULT
+            string "Default active protocol (openclaw or hermes)"
+            default "openclaw"
+
+        config PROTO_TOKEN_MILESTONE
+            int "Token count for celebrate milestone"
+            default 50000
+
+    endmenu
+
+    menu "Wi-Fi"
+
+        config SB_WIFI_SSID
+            string "Default Wi-Fi SSID"
+            default ""
+
+        config SB_WIFI_PASSWORD
+            string "Default Wi-Fi Password"
+            default ""
+
+    endmenu
+
+    menu "IMU Gestures"
+
+        config IMU_SHAKE_THRESHOLD_MG
+            int "Shake detection threshold in milli-g (1000 = 1g)"
+            default 1500
+
+        config IMU_FACE_DOWN_THRESHOLD_MG
+            int "Face-down Z-axis threshold in milli-g"
+            default 850
+
+    endmenu
+
+    menu "UI Behavior"
+
+        config UI_SCREEN_OFF_TIMEOUT_S
+            int "Screen off timeout in seconds (0 = disabled)"
+            default 30
+
+        config UI_APPROVAL_TIMEOUT_S
+            int "Approval auto-deny timeout in seconds"
+            default 30
+
+        config UI_HEART_DURATION_MS
+            int "Heart state display duration in ms"
+            default 2000
+
+        config UI_CELEBRATE_DURATION_MS
+            int "Celebrate state display duration in ms"
+            default 3000
+
+        config UI_DIZZY_DURATION_MS
+            int "Dizzy state display duration in ms"
+            default 2000
+
+    endmenu
+
+endmenu

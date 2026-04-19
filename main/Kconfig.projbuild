@@ -45,17 +45,39 @@ menu "Smart-Buddy Configuration"
 
     menu "Protocol Adapters"
 
+        choice BUDDY_MODE
+            prompt "Buddy Protocol Mode"
+            default BUDDY_MODE_CLAUDE
+
+            config BUDDY_MODE_CLAUDE
+                bool "Claude Buddy (compatible with claude-desktop-buddy)"
+
+            config BUDDY_MODE_OPENCLAW
+                bool "OpenClaw Buddy"
+
+            config BUDDY_MODE_HERMES
+                bool "Hermes Buddy"
+
+        endchoice
+
+        # Hidden derived configs — preserve existing #if guards in source files
+        config PROTO_CLAUDE_BUDDY_ENABLED
+            bool
+            default y if BUDDY_MODE_CLAUDE
+
         config PROTO_OPENCLAW_ENABLED
-            bool "Enable OpenClaw protocol adapter"
-            default y
+            bool
+            default y if BUDDY_MODE_OPENCLAW
 
         config PROTO_HERMES_ENABLED
-            bool "Enable Hermes protocol adapter"
-            default y
+            bool
+            default y if BUDDY_MODE_HERMES
 
         config PROTO_DEFAULT
-            string "Default active protocol (openclaw or hermes)"
-            default "openclaw"
+            string
+            default "claude_buddy" if BUDDY_MODE_CLAUDE
+            default "openclaw"     if BUDDY_MODE_OPENCLAW
+            default "hermes"       if BUDDY_MODE_HERMES
 
         config PROTO_TOKEN_MILESTONE
             int "Token count for celebrate milestone"

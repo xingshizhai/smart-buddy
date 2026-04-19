@@ -8,6 +8,8 @@ typedef enum {
     UI_SCREEN_APPROVAL,
     UI_SCREEN_STATUS,
     UI_SCREEN_SETTINGS,
+    UI_SCREEN_DEBUG,
+    UI_SCREEN_BLE_DEBUG,
     UI_SCREEN_MAX,
 } ui_screen_id_t;
 

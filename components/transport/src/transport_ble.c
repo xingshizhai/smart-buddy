@@ -106,6 +106,8 @@ static const struct ble_gatt_svc_def s_gatt_svcs[] = {
 static void ble_on_sync(void)
 {
     ble_hs_util_ensure_addr(0);
+    /* Advertise our preferred MTU so central can negotiate up to 512 bytes */
+    ble_att_set_preferred_mtu(512);
     ble_start_advertising();
 }
 
@@ -143,7 +145,8 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
             if (s_ctx->base.state_cb)
                 s_ctx->base.state_cb(TRANSPORT_ID_BLE, TRANSPORT_STATE_CONNECTED,
                                      s_ctx->base.cb_ctx);
-            ble_gattc_exchange_mtu(s_ctx->conn_handle, NULL, NULL);
+            /* MTU exchange is initiated by the central; our preferred size
+             * is already set by ble_att_set_preferred_mtu() in ble_on_sync. */
         } else {
             ble_start_advertising();
         }
@@ -246,6 +249,24 @@ esp_err_t transport_ble_create(transport_t **out, const char *device_name, uint1
     s_ctx = ctx;
     *out  = (transport_t *)ctx;
     return ESP_OK;
+}
+
+esp_err_t transport_ble_get_mac(uint8_t mac[6])
+{
+    uint8_t addr[6];
+    uint8_t addr_type;
+    int rc = ble_hs_id_infer_auto(0, &addr_type);
+    if (rc != 0) return ESP_FAIL;
+    rc = ble_hs_id_copy_addr(addr_type, addr, NULL);
+    if (rc != 0) return ESP_FAIL;
+    /* NimBLE stores address in little-endian; reverse to display order */
+    for (int i = 0; i < 6; i++) mac[i] = addr[5 - i];
+    return ESP_OK;
+}
+
+uint16_t transport_ble_get_mtu(void)
+{
+    return s_ctx ? s_ctx->mtu : 23;
 }
 
 #endif /* CONFIG_TRANSPORT_BLE_ENABLED */

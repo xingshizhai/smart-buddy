@@ -1,11 +1,15 @@
 idf_component_register(
-    SRCS "src/ui_manager.c"
+    SRCS
+        "src/ui_manager.c"
+        "src/ui_screen_debug.c"
+        "src/ui_screen_ble_debug.c"
     INCLUDE_DIRS "include"
     REQUIRES
         buddy_hal
         state_machine
         agent_core
         transport
+        audio_manager
         log
     PRIV_REQUIRES
         lvgl__lvgl

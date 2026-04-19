@@ -10,6 +10,7 @@
 #include "state_machine.h"
 #include "transport/transport.h"
 #include "protocol/protocol.h"
+#include "ui/ui_manager.h"
 
 #define TAG          "AGENT"
 #define QUEUE_DEPTH  32
@@ -105,15 +106,19 @@ static void agent_task(void *arg)
 
         case AGENT_EVT_SESSION_UPDATE: {
             uint32_t running = evt.data.session.running;
-            if (running > 0) {
+            uint32_t waiting = evt.data.session.waiting;
+            /* Drive state machine: waiting sessions take priority over running */
+            if (waiting == 0 && running > 0) {
                 sm_evt.type = SM_EVT_SESSION_STARTED;
                 sm_post_event(s_sm, &sm_evt);
-            } else {
+            } else if (waiting == 0 && running == 0) {
                 sm_evt.type = SM_EVT_SESSION_ENDED;
                 sm_post_event(s_sm, &sm_evt);
             }
+            /* Update stats + token display */
             agent_stats_update_tokens(evt.data.session.tokens_total,
                                        evt.data.session.tokens_today);
+            ui_screen_main_set_token_count(evt.data.session.tokens_total);
             break;
         }
 
@@ -125,6 +130,10 @@ static void agent_task(void *arg)
 
         case AGENT_EVT_APPROVAL_REQUEST:
             strlcpy(s_pending_id, evt.data.approval_req.id, sizeof(s_pending_id));
+            /* Populate approval screen before switching to it */
+            ui_screen_approval_set_prompt(evt.data.approval_req.tool,
+                                          evt.data.approval_req.hint,
+                                          evt.data.approval_req.id);
             sm_evt.type = SM_EVT_APPROVAL_REQUEST;
             sm_post_event(s_sm, &sm_evt);
             break;

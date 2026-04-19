@@ -1,11 +1,15 @@
 #include <string.h>
+#include <stdio.h>
 #include "esp_log.h"
+#include "esp_heap_caps.h"
+#include "esp_system.h"
 #include "lvgl.h"
 #include "esp_lvgl_port.h"
 #include "ui/ui_manager.h"
 #include "buddy_hal/hal.h"
 #include "buddy_hal/agent_events.h"
 #include "agent_core.h"
+#include "agent_stats.h"
 #include "transport/transport.h"
 
 #define TAG "UI"
@@ -28,14 +32,30 @@ static lv_obj_t *screen_main_create(void);
 static lv_obj_t *screen_approval_create(void);
 static lv_obj_t *screen_status_create(void);
 static lv_obj_t *screen_settings_create(void);
+/* Defined in ui_screen_debug.c */
+lv_obj_t *screen_debug_create(void);
+void      ui_screen_debug_on_show(void);
+void      ui_screen_debug_on_hide(void);
+
+/* Defined in ui_screen_ble_debug.c */
+lv_obj_t *screen_ble_debug_create(void);
+void      ui_screen_ble_debug_on_show(void);
+void      ui_screen_ble_debug_on_hide(void);
 
 /* Main screen state label and token label (updated externally) */
 static lv_obj_t *s_main_state_label  = NULL;
 static lv_obj_t *s_main_token_label  = NULL;
 static lv_obj_t *s_approval_tool     = NULL;
 static lv_obj_t *s_approval_hint     = NULL;
-static lv_obj_t *s_approval_id_store[64];
+static char       s_approval_id_store[64];
 static lv_obj_t *s_approval_arc      = NULL;
+
+/* Status screen live labels */
+static lv_obj_t *s_status_tokens     = NULL;
+static lv_obj_t *s_status_sessions   = NULL;
+static lv_obj_t *s_status_approvals  = NULL;
+static lv_obj_t *s_status_heap       = NULL;
+static lv_obj_t *s_status_transport  = NULL;
 
 static lv_timer_t *s_approval_timer  = NULL;
 static lv_timer_t *s_screenoff_timer = NULL;
@@ -64,7 +84,7 @@ static void approval_timeout_cb(lv_timer_t *t)
         .timestamp_us = 0,
     };
     /* s_approval_id_store holds the id string */
-    strlcpy(evt.data.approval_resp.id, (const char *)s_approval_id_store,
+    strlcpy(evt.data.approval_resp.id, s_approval_id_store,
             sizeof(evt.data.approval_resp.id));
     agent_core_post_event(&evt);
     lv_timer_del(s_approval_timer);
@@ -77,7 +97,7 @@ static void approve_btn_cb(lv_event_t *e)
         .type = AGENT_EVT_APPROVAL_RESOLVED,
         .data.approval_resp.approved = true,
     };
-    strlcpy(evt.data.approval_resp.id, (const char *)s_approval_id_store,
+    strlcpy(evt.data.approval_resp.id, s_approval_id_store,
             sizeof(evt.data.approval_resp.id));
     agent_core_post_event(&evt);
     if (s_approval_timer) { lv_timer_del(s_approval_timer); s_approval_timer = NULL; }
@@ -89,7 +109,7 @@ static void deny_btn_cb(lv_event_t *e)
         .type = AGENT_EVT_APPROVAL_RESOLVED,
         .data.approval_resp.approved = false,
     };
-    strlcpy(evt.data.approval_resp.id, (const char *)s_approval_id_store,
+    strlcpy(evt.data.approval_resp.id, s_approval_id_store,
             sizeof(evt.data.approval_resp.id));
     agent_core_post_event(&evt);
     if (s_approval_timer) { lv_timer_del(s_approval_timer); s_approval_timer = NULL; }
@@ -106,24 +126,50 @@ static lv_obj_t *screen_boot_create(void)
     return scr;
 }
 
+static void main_settings_btn_cb(lv_event_t *e)
+{
+    ui_manager_push(UI_SCREEN_SETTINGS, UI_ANIM_SLIDE_LEFT);
+}
+
 static lv_obj_t *screen_main_create(void)
 {
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
 
-    /* Status bar */
+    /* Status bar — purely decorative strip at the top */
     lv_obj_t *bar = lv_obj_create(scr);
-    lv_obj_set_size(bar, 320, 24);
+    lv_obj_set_size(bar, 320, 28);
     lv_obj_align(bar, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_obj_set_style_bg_color(bar, lv_color_make(0x20, 0x20, 0x20), 0);
     lv_obj_set_style_border_width(bar, 0, 0);
     lv_obj_set_style_radius(bar, 0, 0);
-    lv_obj_set_style_pad_all(bar, 2, 0);
+    lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
 
-    s_main_token_label = lv_label_create(bar);
+    /* Token counter — right side of status bar, placed on scr to avoid clipping */
+    s_main_token_label = lv_label_create(scr);
     lv_label_set_text(s_main_token_label, "0 tok");
     lv_obj_set_style_text_color(s_main_token_label, lv_color_white(), 0);
-    lv_obj_align(s_main_token_label, LV_ALIGN_RIGHT_MID, -4, 0);
+    lv_obj_align(s_main_token_label, LV_ALIGN_TOP_RIGHT, -8, 6);
+
+    /*
+     * Settings button — placed directly on scr (not inside bar) so it is
+     * never clipped by the container's OVERFLOW_HIDDEN boundary.
+     * Tap it to open the Settings screen.
+     */
+    lv_obj_t *btn_cfg = lv_btn_create(scr);
+    lv_obj_set_size(btn_cfg, 36, 28);
+    lv_obj_align(btn_cfg, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_style_bg_color(btn_cfg, lv_color_make(0x38, 0x38, 0x38), 0);
+    lv_obj_set_style_bg_color(btn_cfg, lv_color_make(0x60, 0x60, 0x60), LV_STATE_PRESSED);
+    lv_obj_set_style_radius(btn_cfg, 0, 0);
+    lv_obj_set_style_shadow_width(btn_cfg, 0, 0);
+    lv_obj_set_style_pad_all(btn_cfg, 0, 0);
+    lv_obj_add_event_cb(btn_cfg, main_settings_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *icon = lv_label_create(btn_cfg);
+    lv_label_set_text(icon, LV_SYMBOL_SETTINGS);
+    lv_obj_set_style_text_color(icon, lv_color_make(0xDD, 0xDD, 0xDD), 0);
+    lv_obj_set_style_text_font(icon, &lv_font_montserrat_16, 0);
+    lv_obj_center(icon);
 
     /* Avatar placeholder */
     lv_obj_t *avatar = lv_label_create(scr);
@@ -194,25 +240,141 @@ static lv_obj_t *screen_approval_create(void)
     return scr;
 }
 
+static void status_back_cb(lv_event_t *e) { ui_manager_pop(UI_ANIM_SLIDE_RIGHT); }
+
+static lv_obj_t *make_stat_row(lv_obj_t *parent, int y, const char *icon, const char *init)
+{
+    lv_obj_t *icon_lbl = lv_label_create(parent);
+    lv_label_set_text(icon_lbl, icon);
+    lv_obj_set_style_text_color(icon_lbl, lv_color_make(0x88, 0x88, 0x88), 0);
+    lv_obj_set_style_text_font(icon_lbl, &lv_font_montserrat_16, 0);
+    lv_obj_align(icon_lbl, LV_ALIGN_TOP_LEFT, 10, y);
+
+    lv_obj_t *val = lv_label_create(parent);
+    lv_label_set_text(val, init);
+    lv_obj_set_style_text_color(val, lv_color_white(), 0);
+    lv_obj_set_style_text_font(val, &lv_font_montserrat_16, 0);
+    lv_obj_align(val, LV_ALIGN_TOP_LEFT, 36, y);
+    return val;
+}
+
 static lv_obj_t *screen_status_create(void)
 {
     lv_obj_t *scr = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
-    lv_obj_t *label = lv_label_create(scr);
-    lv_label_set_text(label, "Status Screen\n(touch to go back)");
-    lv_obj_set_style_text_color(label, lv_color_white(), 0);
-    lv_obj_center(label);
+    lv_obj_set_style_bg_color(scr, lv_color_make(0x08, 0x08, 0x10), 0);
+    lv_obj_set_style_pad_all(scr, 0, 0);
+
+    /* Title bar with back button */
+    lv_obj_t *bar = lv_obj_create(scr);
+    lv_obj_set_size(bar, 320, 36);
+    lv_obj_align(bar, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_style_bg_color(bar, lv_color_make(0x15, 0x15, 0x25), 0);
+    lv_obj_set_style_border_width(bar, 0, 0);
+    lv_obj_set_style_radius(bar, 0, 0);
+    lv_obj_set_style_pad_all(bar, 4, 0);
+    lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *btn_bk = lv_btn_create(bar);
+    lv_obj_set_size(btn_bk, 50, 26);
+    lv_obj_align(btn_bk, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_bg_color(btn_bk, lv_color_make(0x30, 0x30, 0x50), 0);
+    lv_obj_add_event_cb(btn_bk, status_back_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_bk = lv_label_create(btn_bk);
+    lv_label_set_text(lbl_bk, LV_SYMBOL_LEFT " Back");
+    lv_obj_set_style_text_font(lbl_bk, &lv_font_montserrat_16, 0);
+    lv_obj_center(lbl_bk);
+
+    lv_obj_t *lbl_title = lv_label_create(bar);
+    lv_label_set_text(lbl_title, "Status");
+    lv_obj_set_style_text_color(lbl_title, lv_color_white(), 0);
+    lv_obj_set_style_text_font(lbl_title, &lv_font_montserrat_16, 0);
+    lv_obj_align(lbl_title, LV_ALIGN_CENTER, 0, 0);
+
+    /* Stat rows (icon + value) */
+    s_status_tokens    = make_stat_row(scr, 44,  LV_SYMBOL_CHARGE,    "-- tokens");
+    s_status_sessions  = make_stat_row(scr, 72,  LV_SYMBOL_REFRESH,   "-- sessions");
+    s_status_approvals = make_stat_row(scr, 100, LV_SYMBOL_OK,        "--  approved / -- denied");
+    s_status_heap      = make_stat_row(scr, 128, LV_SYMBOL_SETTINGS,  "-- KB free");
+    s_status_transport = make_stat_row(scr, 156, LV_SYMBOL_WIFI,      "disconnected");
+
     return scr;
+}
+
+static void settings_ble_debug_btn_cb(lv_event_t *e)
+{
+    ui_manager_push(UI_SCREEN_BLE_DEBUG, UI_ANIM_SLIDE_LEFT);
+}
+
+static void settings_debug_btn_cb(lv_event_t *e)
+{
+    ui_manager_push(UI_SCREEN_DEBUG, UI_ANIM_SLIDE_LEFT);
+}
+
+static void settings_status_btn_cb(lv_event_t *e)
+{
+    ui_screen_status_refresh();
+    ui_manager_push(UI_SCREEN_STATUS, UI_ANIM_SLIDE_LEFT);
+}
+
+static void settings_back_btn_cb(lv_event_t *e)
+{
+    ui_manager_pop(UI_ANIM_SLIDE_RIGHT);
 }
 
 static lv_obj_t *screen_settings_create(void)
 {
     lv_obj_t *scr = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
-    lv_obj_t *label = lv_label_create(scr);
-    lv_label_set_text(label, "Settings Screen\n(touch to go back)");
-    lv_obj_set_style_text_color(label, lv_color_white(), 0);
-    lv_obj_center(label);
+    lv_obj_set_style_bg_color(scr, lv_color_make(0x0A, 0x0A, 0x12), 0);
+    lv_obj_set_style_pad_all(scr, 0, 0);
+
+    /* Title bar */
+    lv_obj_t *bar = lv_obj_create(scr);
+    lv_obj_set_size(bar, 320, 36);
+    lv_obj_align(bar, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_set_style_bg_color(bar, lv_color_make(0x15, 0x15, 0x25), 0);
+    lv_obj_set_style_border_width(bar, 0, 0);
+    lv_obj_set_style_radius(bar, 0, 0);
+    lv_obj_set_style_pad_all(bar, 4, 0);
+
+    lv_obj_t *btn_bk = lv_btn_create(bar);
+    lv_obj_set_size(btn_bk, 50, 26);
+    lv_obj_align(btn_bk, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_bg_color(btn_bk, lv_color_make(0x30, 0x30, 0x50), 0);
+    lv_obj_add_event_cb(btn_bk, settings_back_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl_bk = lv_label_create(btn_bk);
+    lv_label_set_text(lbl_bk, LV_SYMBOL_LEFT " Back");
+    lv_obj_set_style_text_font(lbl_bk, &lv_font_montserrat_16, 0);
+    lv_obj_center(lbl_bk);
+
+    lv_obj_t *lbl_title = lv_label_create(bar);
+    lv_label_set_text(lbl_title, "Settings");
+    lv_obj_set_style_text_color(lbl_title, lv_color_white(), 0);
+    lv_obj_set_style_text_font(lbl_title, &lv_font_montserrat_16, 0);
+    lv_obj_align(lbl_title, LV_ALIGN_CENTER, 0, 0);
+
+    /* Menu list */
+    lv_obj_t *list = lv_list_create(scr);
+    lv_obj_set_size(list, 320, 240 - 36);
+    lv_obj_align(list, LV_ALIGN_TOP_LEFT, 0, 36);
+    lv_obj_set_style_bg_color(list, lv_color_make(0x0A, 0x0A, 0x12), 0);
+    lv_obj_set_style_border_width(list, 0, 0);
+    lv_obj_set_style_pad_row(list, 2, 0);
+
+    lv_obj_t *btn_st = lv_list_add_btn(list, LV_SYMBOL_LIST, "Device Status");
+    lv_obj_set_style_bg_color(btn_st, lv_color_make(0x20, 0x20, 0x35), 0);
+    lv_obj_set_style_text_color(btn_st, lv_color_white(), 0);
+    lv_obj_add_event_cb(btn_st, settings_status_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *btn_ble = lv_list_add_btn(list, LV_SYMBOL_BLUETOOTH, "BLE Debug");
+    lv_obj_set_style_bg_color(btn_ble, lv_color_make(0x20, 0x20, 0x35), 0);
+    lv_obj_set_style_text_color(btn_ble, lv_color_white(), 0);
+    lv_obj_add_event_cb(btn_ble, settings_ble_debug_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *btn = lv_list_add_btn(list, LV_SYMBOL_AUDIO, "Audio Debug");
+    lv_obj_set_style_bg_color(btn, lv_color_make(0x20, 0x20, 0x35), 0);
+    lv_obj_set_style_text_color(btn, lv_color_white(), 0);
+    lv_obj_add_event_cb(btn, settings_debug_btn_cb, LV_EVENT_CLICKED, NULL);
+
     return scr;
 }
 
@@ -224,8 +386,18 @@ static lv_obj_t *create_screen(ui_screen_id_t id)
     case UI_SCREEN_APPROVAL: return screen_approval_create();
     case UI_SCREEN_STATUS:   return screen_status_create();
     case UI_SCREEN_SETTINGS: return screen_settings_create();
+    case UI_SCREEN_DEBUG:     return screen_debug_create();
+    case UI_SCREEN_BLE_DEBUG: return screen_ble_debug_create();
     default:                 return NULL;
     }
+}
+
+static void notify_screen_lifecycle(ui_screen_id_t leaving, ui_screen_id_t entering)
+{
+    if (leaving == UI_SCREEN_DEBUG)       ui_screen_debug_on_hide();
+    if (entering == UI_SCREEN_DEBUG)      ui_screen_debug_on_show();
+    if (leaving == UI_SCREEN_BLE_DEBUG)   ui_screen_ble_debug_on_hide();
+    if (entering == UI_SCREEN_BLE_DEBUG)  ui_screen_ble_debug_on_show();
 }
 
 esp_err_t ui_manager_init(void)
@@ -247,6 +419,7 @@ void ui_manager_deinit(void)
 esp_err_t ui_manager_show(ui_screen_id_t id, ui_anim_type_t anim)
 {
     if (id >= UI_SCREEN_MAX) return ESP_ERR_INVALID_ARG;
+    ui_screen_id_t prev = ui_manager_current();
     if (lvgl_port_lock(100)) {
         lv_scr_load_anim(s_screens[id],
                           anim == UI_ANIM_FADE       ? LV_SCR_LOAD_ANIM_FADE_ON      :
@@ -258,21 +431,45 @@ esp_err_t ui_manager_show(ui_screen_id_t id, ui_anim_type_t anim)
         s_stack[0]  = id;
         lvgl_port_unlock();
     }
+    notify_screen_lifecycle(prev, id);
     return ESP_OK;
 }
 
 esp_err_t ui_manager_push(ui_screen_id_t id, ui_anim_type_t anim)
 {
+    ui_screen_id_t prev = ui_manager_current();
     if (s_stack_top < SCREEN_STACK_DEPTH - 1) {
         s_stack[++s_stack_top] = id;
     }
-    return ui_manager_show(id, anim);
+    if (lvgl_port_lock(100)) {
+        lv_scr_load_anim(s_screens[id],
+                          anim == UI_ANIM_FADE       ? LV_SCR_LOAD_ANIM_FADE_ON      :
+                          anim == UI_ANIM_SLIDE_LEFT  ? LV_SCR_LOAD_ANIM_MOVE_LEFT   :
+                          anim == UI_ANIM_SLIDE_RIGHT ? LV_SCR_LOAD_ANIM_MOVE_RIGHT  :
+                                                        LV_SCR_LOAD_ANIM_NONE,
+                          200, 0, false);
+        lvgl_port_unlock();
+    }
+    notify_screen_lifecycle(prev, id);
+    return ESP_OK;
 }
 
 esp_err_t ui_manager_pop(ui_anim_type_t anim)
 {
+    ui_screen_id_t prev = ui_manager_current();
     if (s_stack_top > 0) s_stack_top--;
-    return ui_manager_show(s_stack[s_stack_top], anim);
+    ui_screen_id_t next = s_stack[s_stack_top];
+    if (lvgl_port_lock(100)) {
+        lv_scr_load_anim(s_screens[next],
+                          anim == UI_ANIM_FADE       ? LV_SCR_LOAD_ANIM_FADE_ON      :
+                          anim == UI_ANIM_SLIDE_LEFT  ? LV_SCR_LOAD_ANIM_MOVE_LEFT   :
+                          anim == UI_ANIM_SLIDE_RIGHT ? LV_SCR_LOAD_ANIM_MOVE_RIGHT  :
+                                                        LV_SCR_LOAD_ANIM_NONE,
+                          200, 0, false);
+        lvgl_port_unlock();
+    }
+    notify_screen_lifecycle(prev, next);
+    return ESP_OK;
 }
 
 ui_screen_id_t ui_manager_current(void)
@@ -333,7 +530,7 @@ void ui_screen_approval_set_prompt(const char *tool, const char *hint, const cha
         if (s_approval_hint)
             lv_label_set_text(s_approval_hint, hint ? hint : "");
         if (id)
-            strlcpy((char *)s_approval_id_store, id, sizeof(s_approval_id_store));
+            strlcpy(s_approval_id_store, id, sizeof(s_approval_id_store));
         if (s_approval_arc)
             lv_arc_set_value(s_approval_arc, 100);
         lvgl_port_unlock();
@@ -345,5 +542,48 @@ void ui_screen_approval_set_prompt(const char *tool, const char *hint, const cha
     lv_timer_set_repeat_count(s_approval_timer, 1);
 }
 
-void ui_screen_status_refresh(void) { /* TODO: populate status widgets */ }
-void ui_statusbar_update(void)      { /* TODO: refresh connection indicators */ }
+void ui_screen_status_refresh(void)
+{
+    agent_stats_t st = agent_stats_get();
+    uint32_t free_kb = esp_get_free_heap_size() / 1024;
+
+    /* Determine transport connection string */
+    const char *transport_str = "disconnected";
+    if (transport_get_state(TRANSPORT_ID_BLE) == TRANSPORT_STATE_CONNECTED)
+        transport_str = "BLE connected";
+    else if (transport_get_state(TRANSPORT_ID_WS) == TRANSPORT_STATE_CONNECTED)
+        transport_str = "WS connected";
+    else if (transport_get_state(TRANSPORT_ID_USB) == TRANSPORT_STATE_CONNECTED)
+        transport_str = "USB connected";
+
+    if (!lvgl_port_lock(100)) return;
+
+    if (s_status_tokens) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%lu tokens", (unsigned long)st.tokens_total);
+        lv_label_set_text(s_status_tokens, buf);
+    }
+    if (s_status_sessions) {
+        char buf[24];
+        snprintf(buf, sizeof(buf), "%lu sessions", (unsigned long)st.sessions_count);
+        lv_label_set_text(s_status_sessions, buf);
+    }
+    if (s_status_approvals) {
+        char buf[40];
+        snprintf(buf, sizeof(buf), "%lu approved / %lu denied",
+                 (unsigned long)st.approvals_granted, (unsigned long)st.approvals_denied);
+        lv_label_set_text(s_status_approvals, buf);
+    }
+    if (s_status_heap) {
+        char buf[24];
+        snprintf(buf, sizeof(buf), "%lu KB free", (unsigned long)free_kb);
+        lv_label_set_text(s_status_heap, buf);
+    }
+    if (s_status_transport) {
+        lv_label_set_text(s_status_transport, transport_str);
+    }
+
+    lvgl_port_unlock();
+}
+
+void ui_statusbar_update(void) { }

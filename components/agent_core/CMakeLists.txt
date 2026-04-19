@@ -8,6 +8,7 @@ idf_component_register(
         state_machine
         transport
         protocol
+        ui
         freertos
         log
         esp_timer

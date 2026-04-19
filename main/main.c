@@ -2,24 +2,33 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "nvs_flash.h"
 
 #include "buddy_hal/hal.h"
+#include "buddy_hal/agent_events.h"
 #include "state_machine.h"
 #include "transport/transport.h"
 #include "protocol/protocol.h"
 #include "agent_core.h"
 #include "agent_stats.h"
 #include "imu_monitor.h"
+#include "audio_manager.h"
 #include "ui/ui_manager.h"
 #include "app_config.h"
 
 #define TAG "MAIN"
 
-#ifndef CONFIG_PROTO_DEFAULT
-#define CONFIG_PROTO_DEFAULT "openclaw"
+#ifndef CONFIG_PROTO_CLAUDE_BUDDY_ENABLED
+#define CONFIG_PROTO_CLAUDE_BUDDY_ENABLED 0
+#endif
+#ifndef CONFIG_PROTO_OPENCLAW_ENABLED
+#define CONFIG_PROTO_OPENCLAW_ENABLED 0
+#endif
+#ifndef CONFIG_PROTO_HERMES_ENABLED
+#define CONFIG_PROTO_HERMES_ENABLED 0
 #endif
 #ifndef CONFIG_TRANSPORT_BLE_ENABLED
 #define CONFIG_TRANSPORT_BLE_ENABLED 1
@@ -32,6 +41,25 @@
 #endif
 
 static sm_handle_t s_sm = NULL;
+
+/* ── Push-to-talk ────────────────────────────────────────────────────── */
+
+static void ptt_button_cb(hal_button_id_t id, hal_button_event_t evt, void *ctx)
+{
+    agent_event_t agent_evt = { .timestamp_us = esp_timer_get_time() };
+
+    if (evt == HAL_BTN_EVT_PRESS_DOWN) {
+        audio_manager_record_start();
+        agent_evt.type = AGENT_EVT_AUDIO_RECORD_START;
+        agent_core_post_event(&agent_evt);
+        ESP_LOGI("PTT", "recording started");
+    } else if (evt == HAL_BTN_EVT_PRESS_UP) {
+        audio_manager_record_stop();
+        agent_evt.type = AGENT_EVT_AUDIO_RECORD_STOP;
+        agent_core_post_event(&agent_evt);
+        ESP_LOGI("PTT", "recording stopped");
+    }
+}
 
 /* ── Periodic tasks ─────────────────────────────────────────────────── */
 
@@ -95,6 +123,9 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(hal_audio_create(&audio_cfg, &g_hal.audio));
 
+    /* 3b. Audio manager (recording pipeline + playback queue) */
+    ESP_ERROR_CHECK(audio_manager_init(g_hal.audio));
+
     /* 4. UI — show boot screen */
     ESP_ERROR_CHECK(ui_manager_init());
     ui_manager_show(UI_SCREEN_BOOT, UI_ANIM_NONE);
@@ -104,22 +135,21 @@ void app_main(void)
     sm_register_callback(s_sm, ui_manager_on_state_change, NULL);
 
     /* 6. Protocol adapters */
-    proto_t *openclaw = NULL, *hermes = NULL;
+    proto_t *proto = NULL;
 
-#if CONFIG_PROTO_OPENCLAW_ENABLED
-    ESP_ERROR_CHECK(proto_openclaw_create(&openclaw));
-    ESP_ERROR_CHECK(proto_register(openclaw));
+#if CONFIG_PROTO_CLAUDE_BUDDY_ENABLED
+    ESP_ERROR_CHECK(proto_claude_buddy_create(&proto));
+    ESP_ERROR_CHECK(proto_register(proto));
+#elif CONFIG_PROTO_OPENCLAW_ENABLED
+    ESP_ERROR_CHECK(proto_openclaw_create(&proto));
+    ESP_ERROR_CHECK(proto_register(proto));
+#elif CONFIG_PROTO_HERMES_ENABLED
+    ESP_ERROR_CHECK(proto_hermes_create(&proto));
+    ESP_ERROR_CHECK(proto_register(proto));
 #endif
 
-#if CONFIG_PROTO_HERMES_ENABLED
-    ESP_ERROR_CHECK(proto_hermes_create(&hermes));
-    ESP_ERROR_CHECK(proto_register(hermes));
-#endif
-
-    /* Load saved protocol preference from NVS, fallback to Kconfig default */
-    char active_proto[32] = CONFIG_PROTO_DEFAULT;
-    hal_storage_get_str("proto_active", active_proto, sizeof(active_proto));
-    proto_set_active(active_proto);
+    /* Activate: use Kconfig default (NVS override removed — mode is build-time) */
+    if (proto) proto_set_active(proto->name);
 
     /* 7. Transport layer */
     transport_t *ble = NULL, *ws = NULL, *usb = NULL;
@@ -145,6 +175,15 @@ void app_main(void)
 
     /* 9. IMU monitor */
     imu_monitor_start(g_hal.imu);
+
+    /* 9b. Audio manager tasks + PTT button (BTN_0 = center/mute button) */
+    ESP_ERROR_CHECK(audio_manager_start());
+    if (g_hal.buttons) {
+        g_hal.buttons->register_cb(g_hal.buttons, HAL_BTN_BOOT,
+                                    HAL_BTN_EVT_PRESS_DOWN, ptt_button_cb, NULL);
+        g_hal.buttons->register_cb(g_hal.buttons, HAL_BTN_BOOT,
+                                    HAL_BTN_EVT_PRESS_UP,   ptt_button_cb, NULL);
+    }
 
     /* 10. Periodic background tasks */
     xTaskCreate(heartbeat_task,    "heartbeat",   2048, NULL, 2, NULL);

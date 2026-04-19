@@ -8,10 +8,12 @@ idf_component_register(
         protocol
         agent_core
         imu_monitor
+        audio_manager
         ui
         nvs_flash
         esp_event
         esp_netif
+        esp_timer
         log
         freertos
 )

@@ -75,7 +75,10 @@ static void enter_state(sm_ctx_t *ctx, sm_state_t new_state, uint32_t timer_ms)
         new_state == SM_STATE_CELEBRATE ||
         new_state == SM_STATE_DIZZY     ||
         new_state == SM_STATE_HEART) {
-        if (old != SM_STATE_SLEEP && old != new_state)
+        /* Don't overwrite prev_state when HEART follows ATTENTION —
+         * keep the pre-ATTENTION state so the timer return is correct. */
+        bool skip = (new_state == SM_STATE_HEART && old == SM_STATE_ATTENTION);
+        if (!skip && old != SM_STATE_SLEEP && old != new_state)
             ctx->prev_state = old;
     }
 

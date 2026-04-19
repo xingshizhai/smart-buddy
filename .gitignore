@@ -1,4 +1,20 @@
 build/
 sdkconfig
+sdkconfig.old
 managed_components/
 dependencies.lock
+
+# Local IDE/editor state
+.vscode/
+.idea/
+
+# Temporary workspace files
+tmp/
+*.log
+
+# Python cache artifacts (tools/*.py)
+__pycache__/
+*.py[cod]
+
+# OS metadata
+.DS_Store

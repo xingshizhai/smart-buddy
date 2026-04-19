@@ -47,6 +47,7 @@ struct proto_s {
 };
 
 /* Factory functions */
+esp_err_t proto_claude_buddy_create(proto_t **out);
 esp_err_t proto_openclaw_create(proto_t **out);
 esp_err_t proto_hermes_create(proto_t **out);
 

@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "src/protocol.c"
+        "src/proto_claude_buddy.c"
         "src/proto_openclaw.c"
         "src/proto_hermes.c"
     INCLUDE_DIRS "include"

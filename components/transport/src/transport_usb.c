@@ -11,7 +11,7 @@
 #define TAG         "USB"
 #define RX_BUF_SIZE 4096
 #define TX_BUF_SIZE 4096
-#define TASK_STACK  4096
+#define TASK_STACK  8192
 #define TASK_PRIO   4
 
 typedef struct {

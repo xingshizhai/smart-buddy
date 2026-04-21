@@ -34,6 +34,17 @@
     0x9E,0xCA,0xDC,0x24, 0x0E,0xE5, 0xA9,0xE0, \
     0x93,0xF3, 0xA3,0xB5, 0x03,0x00,0x40,0x6E
 
+/* Characteristic security flags — Claude app requires encrypted writes */
+#if CONFIG_TRANSPORT_BLE_REQUIRE_BONDING
+#define NUS_RX_CHR_FLAGS \
+    (BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_WRITE_ENC)
+#define NUS_TX_CHR_FLAGS \
+    (BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_READ_ENC)
+#else
+#define NUS_RX_CHR_FLAGS (BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP)
+#define NUS_TX_CHR_FLAGS (BLE_GATT_CHR_F_NOTIFY)
+#endif
+
 typedef struct {
     transport_t         base;
     char                device_name[32];
@@ -89,13 +100,13 @@ static const struct ble_gatt_svc_def s_gatt_svcs[] = {
             {
                 .uuid      = BLE_UUID128_DECLARE(NUS_RX_UUID_BYTES),
                 .access_cb = nus_chr_access_cb,
-                .flags     = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
+                .flags     = NUS_RX_CHR_FLAGS,
             },
             {
                 .uuid       = BLE_UUID128_DECLARE(NUS_TX_UUID_BYTES),
                 .access_cb  = nus_chr_access_cb,
                 .val_handle = &s_tx_attr_handle,
-                .flags      = BLE_GATT_CHR_F_NOTIFY,
+                .flags      = NUS_TX_CHR_FLAGS,
             },
             { 0 }
         },
@@ -106,8 +117,18 @@ static const struct ble_gatt_svc_def s_gatt_svcs[] = {
 static void ble_on_sync(void)
 {
     ble_hs_util_ensure_addr(0);
-    /* Advertise our preferred MTU so central can negotiate up to 512 bytes */
     ble_att_set_preferred_mtu(512);
+
+#if CONFIG_TRANSPORT_BLE_REQUIRE_BONDING
+    /* Claude app requires encrypted connection — enable SC bonding */
+    ble_hs_cfg.sm_io_cap        = BLE_SM_IO_CAP_NO_IO;
+    ble_hs_cfg.sm_bonding       = 1;
+    ble_hs_cfg.sm_mitm          = 0;
+    ble_hs_cfg.sm_sc            = 1;   /* LE Secure Connections */
+    ble_hs_cfg.sm_our_key_dist  = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+#endif
+
     ble_start_advertising();
 }
 
@@ -120,17 +141,32 @@ static void ble_start_advertising(void)
     uint8_t own_addr_type;
     ble_hs_id_infer_auto(0, &own_addr_type);
 
-    const char *name = s_ctx ? s_ctx->device_name : "SmartBuddy";
-    struct ble_hs_adv_fields fields = {
-        .flags            = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP,
-        .name             = (uint8_t *)name,
+    /*
+     * ADV data: flags + NUS service UUID (Claude app scans by this UUID).
+     * Scan response: complete device name (must start with "Claude").
+     * Splitting is necessary because a 128-bit UUID + flags already fills
+     * the 31-byte ADV payload, leaving no room for the name.
+     */
+    ble_uuid128_t nus_svc_uuid = BLE_UUID128_INIT(NUS_SVC_UUID_BYTES);
+    struct ble_hs_adv_fields adv_fields = {
+        .flags                = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP,
+        .uuids128             = &nus_svc_uuid,
+        .num_uuids128         = 1,
+        .uuids128_is_complete = 1,
+    };
+    ble_gap_adv_set_fields(&adv_fields);
+
+    const char *name = s_ctx ? s_ctx->device_name : CONFIG_TRANSPORT_BLE_DEVICE_NAME;
+    struct ble_hs_adv_fields rsp_fields = {
+        .name             = (const uint8_t *)name,
         .name_len         = strlen(name),
         .name_is_complete = 1,
     };
-    ble_gap_adv_set_fields(&fields);
+    ble_gap_adv_rsp_set_fields(&rsp_fields);
+
     ble_gap_adv_start(own_addr_type, NULL, BLE_HS_FOREVER, &adv_params,
                       ble_gap_event_cb, NULL);
-    ESP_LOGI(TAG, "advertising as \"%s\"", name);
+    ESP_LOGI(TAG, "advertising as \"%s\" with NUS UUID", name);
 }
 
 static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)

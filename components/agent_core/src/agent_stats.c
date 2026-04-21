@@ -37,6 +37,11 @@ void agent_stats_record_approval(bool approved)
     else          s_stats.approvals_denied++;
 }
 
+void agent_stats_record_session_start(void)
+{
+    s_stats.sessions_count++;
+}
+
 bool agent_stats_check_milestone(uint32_t new_total)
 {
     if (new_total >= s_stats.milestone_next) {

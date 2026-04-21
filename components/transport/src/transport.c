@@ -16,6 +16,15 @@ void transport_set_callbacks(transport_rx_cb_t rx_cb,
     s_rx_cb    = rx_cb;
     s_state_cb = state_cb;
     s_cb_ctx   = ctx;
+    /* Back-fill already-registered transports — handles the case where
+     * transports are registered before agent_core calls this function. */
+    for (int i = 0; i < TRANSPORT_MAX_INSTANCES; i++) {
+        if (s_transports[i]) {
+            s_transports[i]->rx_cb    = rx_cb;
+            s_transports[i]->state_cb = state_cb;
+            s_transports[i]->cb_ctx   = ctx;
+        }
+    }
 }
 
 esp_err_t transport_register(transport_t *t)

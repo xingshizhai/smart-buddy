@@ -49,6 +49,9 @@ static lv_obj_t *s_approval_tool     = NULL;
 static lv_obj_t *s_approval_hint     = NULL;
 static char       s_approval_id_store[64];
 static lv_obj_t *s_approval_arc      = NULL;
+static lv_timer_t *s_arc_timer       = NULL;
+static uint32_t   s_arc_timeout_ms   = 0;
+static uint32_t   s_arc_elapsed_ms   = 0;
 
 /* Status screen live labels */
 static lv_obj_t *s_status_tokens     = NULL;
@@ -75,20 +78,38 @@ static void screenoff_timer_cb(lv_timer_t *t)
         g_hal.display->backlight_set(g_hal.display, 0);
 }
 
+static void arc_tick_cb(lv_timer_t *t)
+{
+    s_arc_elapsed_ms += 250;
+    if (s_arc_timeout_ms > 0 && s_approval_arc) {
+        int32_t pct = 100 - (int32_t)(s_arc_elapsed_ms * 100 / s_arc_timeout_ms);
+        if (pct < 0) pct = 0;
+        lv_arc_set_value(s_approval_arc, (int16_t)pct);
+    }
+}
+
 static void approval_timeout_cb(lv_timer_t *t)
 {
+    if (s_arc_timer) { lv_timer_del(s_arc_timer); s_arc_timer = NULL; }
+    if (s_approval_arc) lv_arc_set_value(s_approval_arc, 0);
+
     /* Auto-deny */
     agent_event_t evt = {
         .type = AGENT_EVT_APPROVAL_RESOLVED,
         .data.approval_resp.approved = false,
         .timestamp_us = 0,
     };
-    /* s_approval_id_store holds the id string */
     strlcpy(evt.data.approval_resp.id, s_approval_id_store,
             sizeof(evt.data.approval_resp.id));
     agent_core_post_event(&evt);
     lv_timer_del(s_approval_timer);
     s_approval_timer = NULL;
+}
+
+static void stop_approval_timers(void)
+{
+    if (s_arc_timer)      { lv_timer_del(s_arc_timer);      s_arc_timer      = NULL; }
+    if (s_approval_timer) { lv_timer_del(s_approval_timer); s_approval_timer = NULL; }
 }
 
 static void approve_btn_cb(lv_event_t *e)
@@ -100,7 +121,7 @@ static void approve_btn_cb(lv_event_t *e)
     strlcpy(evt.data.approval_resp.id, s_approval_id_store,
             sizeof(evt.data.approval_resp.id));
     agent_core_post_event(&evt);
-    if (s_approval_timer) { lv_timer_del(s_approval_timer); s_approval_timer = NULL; }
+    stop_approval_timers();
 }
 
 static void deny_btn_cb(lv_event_t *e)
@@ -112,7 +133,7 @@ static void deny_btn_cb(lv_event_t *e)
     strlcpy(evt.data.approval_resp.id, s_approval_id_store,
             sizeof(evt.data.approval_resp.id));
     agent_core_post_event(&evt);
-    if (s_approval_timer) { lv_timer_del(s_approval_timer); s_approval_timer = NULL; }
+    stop_approval_timers();
 }
 
 static lv_obj_t *screen_boot_create(void)
@@ -120,7 +141,7 @@ static lv_obj_t *screen_boot_create(void)
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
     lv_obj_t *label = lv_label_create(scr);
-    lv_label_set_text(label, "SmartBuddy\nStarting...");
+    lv_label_set_text(label, "Claude Buddy\nStarting...");
     lv_obj_set_style_text_color(label, lv_color_white(), 0);
     lv_obj_center(label);
     return scr;
@@ -180,7 +201,7 @@ static lv_obj_t *screen_main_create(void)
 
     /* State label */
     s_main_state_label = lv_label_create(scr);
-    lv_label_set_text(s_main_state_label, "Idle");
+    lv_label_set_text(s_main_state_label, s_state_labels[SM_STATE_SLEEP]);
     lv_obj_set_style_text_color(s_main_state_label, lv_color_make(0x80, 0x80, 0x80), 0);
     lv_obj_align(s_main_state_label, LV_ALIGN_CENTER, 0, 40);
 
@@ -536,9 +557,13 @@ void ui_screen_approval_set_prompt(const char *tool, const char *hint, const cha
         lvgl_port_unlock();
     }
 
-    if (s_approval_timer) { lv_timer_del(s_approval_timer); s_approval_timer = NULL; }
+    stop_approval_timers();
+    s_arc_timeout_ms = CONFIG_UI_APPROVAL_TIMEOUT_S * 1000;
+    s_arc_elapsed_ms = 0;
+    s_arc_timer = lv_timer_create(arc_tick_cb, 250, NULL);
+
     s_approval_timer = lv_timer_create(approval_timeout_cb,
-                                        CONFIG_UI_APPROVAL_TIMEOUT_S * 1000, NULL);
+                                        s_arc_timeout_ms, NULL);
     lv_timer_set_repeat_count(s_approval_timer, 1);
 }
 

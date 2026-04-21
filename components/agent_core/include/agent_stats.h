@@ -15,5 +15,6 @@ esp_err_t     agent_stats_init(void);
 agent_stats_t agent_stats_get(void);
 void          agent_stats_update_tokens(uint32_t total, uint32_t today);
 void          agent_stats_record_approval(bool approved);
+void          agent_stats_record_session_start(void);
 void          agent_stats_flush(void);
 bool          agent_stats_check_milestone(uint32_t new_total);

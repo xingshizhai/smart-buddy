@@ -9,6 +9,7 @@
 #include "agent_stats.h"
 #include "state_machine.h"
 #include "transport/transport.h"
+#include <stdbool.h>
 #include "protocol/protocol.h"
 #include "ui/ui_manager.h"
 
@@ -23,6 +24,10 @@ static TaskHandle_t  s_task  = NULL;
 
 /* Pending approval ID for response encoding */
 static char s_pending_id[64] = {0};
+
+/* Per-transport connected state — only go SLEEP when all actually disconnect */
+static bool s_transport_up[TRANSPORT_MAX_INSTANCES] = {false};
+static int  s_connected_count = 0;
 
 static void on_transport_rx(transport_id_t id, const uint8_t *data, size_t len, void *ctx)
 {
@@ -97,10 +102,23 @@ static void agent_task(void *arg)
         switch (evt.type) {
         case AGENT_EVT_TRANSPORT_STATE: {
             bool connected = evt.data.transport.connected;
-            sm_evt.type = connected ? SM_EVT_TRANSPORT_CONNECTED
-                                    : SM_EVT_TRANSPORT_DISCONNECTED;
-            sm_post_event(s_sm, &sm_evt);
-            if (connected) send_time_sync();
+            uint8_t tid = evt.data.transport.transport_id;
+            if (tid >= TRANSPORT_MAX_INSTANCES) break;
+
+            if (connected && !s_transport_up[tid]) {
+                s_transport_up[tid] = true;
+                s_connected_count++;
+                sm_evt.type = SM_EVT_TRANSPORT_CONNECTED;
+                sm_post_event(s_sm, &sm_evt);
+                send_time_sync();
+            } else if (!connected && s_transport_up[tid]) {
+                s_transport_up[tid] = false;
+                s_connected_count--;
+                if (s_connected_count == 0) {
+                    sm_evt.type = SM_EVT_TRANSPORT_DISCONNECTED;
+                    sm_post_event(s_sm, &sm_evt);
+                }
+            }
             break;
         }
 
@@ -111,6 +129,7 @@ static void agent_task(void *arg)
             if (waiting == 0 && running > 0) {
                 sm_evt.type = SM_EVT_SESSION_STARTED;
                 sm_post_event(s_sm, &sm_evt);
+                agent_stats_record_session_start();
             } else if (waiting == 0 && running == 0) {
                 sm_evt.type = SM_EVT_SESSION_ENDED;
                 sm_post_event(s_sm, &sm_evt);

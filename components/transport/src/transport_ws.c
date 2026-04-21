@@ -74,7 +74,7 @@ static esp_err_t ws_transport_start(transport_t *t)
     ws_ctx_t *ctx = (ws_ctx_t *)t;
     esp_websocket_client_config_t ws_cfg = {
         .uri             = ctx->server_url,
-        .reconnect_timeout_ms = ctx->reconnect_ms,
+        .reconnect_timeout_ms = RECONNECT_MS_MAX,
         .network_timeout_ms   = 10000,
     };
     ctx->client = esp_websocket_client_init(&ws_cfg);

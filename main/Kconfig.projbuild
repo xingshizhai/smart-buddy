@@ -10,12 +10,12 @@ menu "Smart-Buddy Configuration"
 
         config TRANSPORT_BLE_DEVICE_NAME
             string "BLE Advertised Name"
-            default "SmartBuddy"
+            default "Claude Buddy"
             depends on TRANSPORT_BLE_ENABLED
 
         config TRANSPORT_BLE_REQUIRE_BONDING
             bool "Require BLE Secure Connection bonding"
-            default y
+            default n
             depends on TRANSPORT_BLE_ENABLED
 
         config TRANSPORT_WS_ENABLED

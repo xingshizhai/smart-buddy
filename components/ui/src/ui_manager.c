@@ -42,9 +42,10 @@ lv_obj_t *screen_ble_debug_create(void);
 void      ui_screen_ble_debug_on_show(void);
 void      ui_screen_ble_debug_on_hide(void);
 
-/* Main screen state label and token label (updated externally) */
+/* Main screen state label, token label, and BLE indicator (updated externally) */
 static lv_obj_t *s_main_state_label  = NULL;
 static lv_obj_t *s_main_token_label  = NULL;
+static lv_obj_t *s_ble_indicator     = NULL;
 static lv_obj_t *s_approval_tool     = NULL;
 static lv_obj_t *s_approval_hint     = NULL;
 static char       s_approval_id_store[64];
@@ -191,6 +192,13 @@ static lv_obj_t *screen_main_create(void)
     lv_obj_set_style_text_color(icon, lv_color_make(0xDD, 0xDD, 0xDD), 0);
     lv_obj_set_style_text_font(icon, &lv_font_montserrat_16, 0);
     lv_obj_center(icon);
+
+    /* BLE status indicator — bluetooth symbol, grey=disconnected, green=connected */
+    s_ble_indicator = lv_label_create(scr);
+    lv_label_set_text(s_ble_indicator, LV_SYMBOL_BLUETOOTH);
+    lv_obj_set_style_text_color(s_ble_indicator, lv_color_make(0x55, 0x55, 0x55), 0);
+    lv_obj_set_style_text_font(s_ble_indicator, &lv_font_montserrat_16, 0);
+    lv_obj_align(s_ble_indicator, LV_ALIGN_TOP_LEFT, 44, 6);
 
     /* Avatar placeholder */
     lv_obj_t *avatar = lv_label_create(scr);
@@ -535,6 +543,19 @@ void ui_screen_main_set_token_count(uint32_t tokens)
             char buf[32];
             snprintf(buf, sizeof(buf), "%lu tok", (unsigned long)tokens);
             lv_label_set_text(s_main_token_label, buf);
+        }
+        lvgl_port_unlock();
+    }
+}
+
+void ui_screen_main_set_ble_connected(bool connected)
+{
+    if (lvgl_port_lock(100)) {
+        if (s_ble_indicator) {
+            lv_color_t color = connected
+                ? lv_color_make(0x00, 0xCC, 0x44)
+                : lv_color_make(0x55, 0x55, 0x55);
+            lv_obj_set_style_text_color(s_ble_indicator, color, 0);
         }
         lvgl_port_unlock();
     }

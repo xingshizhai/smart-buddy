@@ -1,4 +1,5 @@
 #pragma once
+#include <stdbool.h>
 #include "esp_err.h"
 #include "state_machine.h"
 
@@ -33,6 +34,7 @@ void ui_manager_on_state_change(sm_state_t new_state, sm_state_t old_state, void
 /* Per-screen update APIs (thread-safe, acquire LVGL lock internally) */
 void ui_screen_main_set_state(sm_state_t state);
 void ui_screen_main_set_token_count(uint32_t tokens);
+void ui_screen_main_set_ble_connected(bool connected);
 void ui_screen_approval_set_prompt(const char *tool, const char *hint, const char *id);
 void ui_screen_approval_resolve(bool approved);
 void ui_screen_status_refresh(void);

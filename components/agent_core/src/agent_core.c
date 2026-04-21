@@ -119,6 +119,8 @@ static void agent_task(void *arg)
                     sm_post_event(s_sm, &sm_evt);
                 }
             }
+            if (tid == TRANSPORT_ID_BLE)
+                ui_screen_main_set_ble_connected(connected);
             break;
         }
 

@@ -29,8 +29,19 @@ static char s_pending_id[64] = {0};
 static bool s_transport_up[TRANSPORT_MAX_INSTANCES] = {false};
 static int  s_connected_count = 0;
 
+/* Turn-complete: briefly flash BUSY for 1.5 s then auto-return to IDLE */
+static esp_timer_handle_t s_turn_timer = NULL;
+
+static void turn_timer_cb(void *arg)
+{
+    sm_event_t e = {.type = SM_EVT_SESSION_ENDED, .timestamp_us = esp_timer_get_time()};
+    sm_post_event(s_sm, &e);
+}
+
 static void on_transport_rx(transport_id_t id, const uint8_t *data, size_t len, void *ctx)
 {
+    ESP_LOGI(TAG, "RX [t=%d]: %.*s", id, (int)len, (const char *)data);
+
     proto_t *proto = proto_get_active();
     if (!proto) return;
 
@@ -69,6 +80,23 @@ static void send_approval_response(const char *id, bool approved)
         free(encoded);
     }
     agent_stats_record_approval(approved);
+}
+
+static void send_device_name(void)
+{
+    proto_t *proto = proto_get_active();
+    if (!proto) return;
+
+    proto_out_msg_t msg = {
+        .type = PROTO_MSG_DEVICE_NAME,
+    };
+    strlcpy(msg.device.name, "Claude Buddy", sizeof(msg.device.name));
+
+    uint8_t *enc = NULL; size_t enc_len = 0;
+    if (proto->encode(proto, &msg, &enc, &enc_len) == ESP_OK) {
+        transport_send_all(enc, enc_len);
+        free(enc);
+    }
 }
 
 static void send_time_sync(void)
@@ -111,6 +139,12 @@ static void agent_task(void *arg)
                 sm_evt.type = SM_EVT_TRANSPORT_CONNECTED;
                 sm_post_event(s_sm, &sm_evt);
                 send_time_sync();
+                if (tid == TRANSPORT_ID_BLE)
+                    send_device_name();
+            } else if (connected && s_transport_up[tid] && tid == TRANSPORT_ID_BLE) {
+                /* Re-fired after CCCD subscription — send device name now */
+                ESP_LOGI(TAG, "BLE subscribed, sending device name");
+                send_device_name();
             } else if (!connected && s_transport_up[tid]) {
                 s_transport_up[tid] = false;
                 s_connected_count--;
@@ -179,6 +213,16 @@ static void agent_task(void *arg)
             sm_post_event(s_sm, &sm_evt);
             break;
 
+        case AGENT_EVT_TURN_COMPLETE:
+            /* Flash BUSY for 1.5 s so the display shows activity */
+            sm_evt.type = SM_EVT_SESSION_STARTED;
+            sm_post_event(s_sm, &sm_evt);
+            if (s_turn_timer) {
+                esp_timer_stop(s_turn_timer);
+                esp_timer_start_once(s_turn_timer, 1500 * 1000);
+            }
+            break;
+
         default:
             break;
         }
@@ -192,6 +236,13 @@ esp_err_t agent_core_init(sm_handle_t sm)
     if (!s_queue) return ESP_ERR_NO_MEM;
 
     transport_set_callbacks(on_transport_rx, on_transport_state, NULL);
+
+    esp_timer_create_args_t ta = {
+        .callback = turn_timer_cb,
+        .name     = "turn_end",
+    };
+    esp_timer_create(&ta, &s_turn_timer);
+
     return agent_stats_init();
 }
 

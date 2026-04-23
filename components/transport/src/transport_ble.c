@@ -73,6 +73,7 @@ static int nus_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
         uint8_t *buf = malloc(len);
         if (!buf) return BLE_ATT_ERR_INSUFFICIENT_RES;
         ble_hs_mbuf_to_flat(ctxt->om, buf, len, NULL);
+        ESP_LOGI(TAG, "RX %u bytes: %.*s", len, (int)len, (char *)buf);
 
         for (uint16_t i = 0; i < len; i++) {
             if (s_ctx->rx_pos < sizeof(s_ctx->rx_buf) - 1)
@@ -173,6 +174,17 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
 {
     if (!s_ctx) return 0;
     switch (event->type) {
+    case BLE_GAP_EVENT_SUBSCRIBE:
+        /* Central subscribed/unsubscribed to TX notifications */
+        ESP_LOGI(TAG, "subscribe attr=%d notify=%d",
+                 event->subscribe.attr_handle, event->subscribe.cur_notify);
+        if (event->subscribe.attr_handle == s_tx_attr_handle &&
+            event->subscribe.cur_notify && s_ctx->base.state_cb) {
+            /* Re-fire connected so agent_core sends device name after subscription */
+            s_ctx->base.state_cb(TRANSPORT_ID_BLE, TRANSPORT_STATE_CONNECTED,
+                                 s_ctx->base.cb_ctx);
+        }
+        break;
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
             s_ctx->conn_handle = event->connect.conn_handle;

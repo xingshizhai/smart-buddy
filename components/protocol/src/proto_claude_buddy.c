@@ -135,6 +135,19 @@ static esp_err_t claude_buddy_decode(proto_t *proto,
         }
     }
 
+    /* Turn event: {"evt":"turn","role":"assistant"} — Claude completed a response */
+    cJSON *evt_j  = cJSON_GetObjectItem(root, "evt");
+    cJSON *role_j = cJSON_GetObjectItem(root, "role");
+    if (cJSON_IsString(evt_j) && strcmp(evt_j->valuestring, "turn") == 0 &&
+        cJSON_IsString(role_j) && strcmp(role_j->valuestring, "assistant") == 0 &&
+        idx < max_events) {
+        agent_event_t *te = &out_events[idx++];
+        memset(te, 0, sizeof(*te));
+        te->type = AGENT_EVT_TURN_COMPLETE;
+        te->timestamp_us = esp_timer_get_time();
+        ESP_LOGI(TAG, "turn complete: assistant response received");
+    }
+
     *n_events = idx;
     cJSON_Delete(root);
     return ESP_OK;
@@ -161,7 +174,7 @@ static esp_err_t claude_buddy_encode(proto_t *proto,
         break;
 
     case PROTO_MSG_DEVICE_NAME:
-        cJSON_AddStringToObject(root, "type", "device");
+        cJSON_AddStringToObject(root, "cmd", "name");
         cJSON_AddStringToObject(root, "name", msg->device.name);
         break;
 

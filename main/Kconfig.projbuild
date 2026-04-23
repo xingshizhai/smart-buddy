@@ -29,7 +29,7 @@ menu "Smart-Buddy Configuration"
 
         config TRANSPORT_WS_DEFAULT_URL
             string "Default WebSocket server URL"
-            default "ws://192.168.1.100:8080/buddy"
+            default "ws://192.168.2.195:8080/buddy"
             depends on TRANSPORT_WS_ENABLED && TRANSPORT_WS_MODE_CLIENT
 
         config TRANSPORT_WS_SERVER_PORT

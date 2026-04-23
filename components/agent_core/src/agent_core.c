@@ -90,7 +90,7 @@ static void send_device_name(void)
     proto_out_msg_t msg = {
         .type = PROTO_MSG_DEVICE_NAME,
     };
-    strlcpy(msg.device.name, "Claude Buddy", sizeof(msg.device.name));
+    strlcpy(msg.device.name, transport_ble_get_device_name(), sizeof(msg.device.name));
 
     uint8_t *enc = NULL; size_t enc_len = 0;
     if (proto->encode(proto, &msg, &enc, &enc_len) == ESP_OK) {

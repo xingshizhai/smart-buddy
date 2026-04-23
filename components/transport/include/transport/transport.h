@@ -50,8 +50,9 @@ esp_err_t transport_ws_create(transport_t **out, const char *url);
 esp_err_t transport_usb_create(transport_t **out);
 
 /* BLE-specific accessors (safe to call even when disconnected) */
-esp_err_t transport_ble_get_mac(uint8_t mac[6]);
-uint16_t  transport_ble_get_mtu(void);
+esp_err_t   transport_ble_get_mac(uint8_t mac[6]);
+uint16_t    transport_ble_get_mtu(void);
+const char *transport_ble_get_device_name(void);
 
 esp_err_t         transport_register(transport_t *t);
 esp_err_t         transport_start_all(void);

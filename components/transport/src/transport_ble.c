@@ -7,6 +7,7 @@
 #include "freertos/queue.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_mac.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
@@ -283,9 +284,14 @@ esp_err_t transport_ble_create(transport_t **out, const char *device_name, uint1
     ble_ctx_t *ctx = calloc(1, sizeof(ble_ctx_t));
     if (!ctx) return ESP_ERR_NO_MEM;
 
-    strlcpy(ctx->device_name,
-            device_name ? device_name : CONFIG_TRANSPORT_BLE_DEVICE_NAME,
-            sizeof(ctx->device_name));
+    if (device_name && device_name[0]) {
+        strlcpy(ctx->device_name, device_name, sizeof(ctx->device_name));
+    } else {
+        uint8_t mac[6] = {0};
+        esp_read_mac(mac, ESP_MAC_BT);
+        snprintf(ctx->device_name, sizeof(ctx->device_name),
+                 "Claude-%02X%02X", mac[4], mac[5]);
+    }
     ctx->mtu = mtu ? mtu : 512;
     ctx->base.id        = TRANSPORT_ID_BLE;
     ctx->base.init      = ble_tp_init;
@@ -315,6 +321,11 @@ esp_err_t transport_ble_get_mac(uint8_t mac[6])
 uint16_t transport_ble_get_mtu(void)
 {
     return s_ctx ? s_ctx->mtu : 23;
+}
+
+const char *transport_ble_get_device_name(void)
+{
+    return s_ctx ? s_ctx->device_name : CONFIG_TRANSPORT_BLE_DEVICE_NAME;
 }
 
 #endif /* CONFIG_TRANSPORT_BLE_ENABLED */

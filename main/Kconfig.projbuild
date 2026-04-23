@@ -9,8 +9,8 @@ menu "Smart-Buddy Configuration"
             select BT_NIMBLE_ENABLED
 
         config TRANSPORT_BLE_DEVICE_NAME
-            string "BLE Advertised Name"
-            default "Claude Buddy"
+            string "BLE Advertised Name (fallback; auto-generated as Claude-XXYY from MAC when blank)"
+            default ""
             depends on TRANSPORT_BLE_ENABLED
 
         config TRANSPORT_BLE_REQUIRE_BONDING

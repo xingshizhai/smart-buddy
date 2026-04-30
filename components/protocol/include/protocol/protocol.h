@@ -12,6 +12,7 @@ typedef enum {
     PROTO_MSG_DEVICE_NAME,
     PROTO_MSG_HEARTBEAT_ACK,
     PROTO_MSG_TIME_SYNC,
+    PROTO_MSG_CMD_ACK,      /* {"ack":"<cmd>","ok":true[,"data":{...}]} */
 } proto_msg_type_t;
 
 typedef struct {
@@ -28,6 +29,10 @@ typedef struct {
             int64_t epoch_s;
             int32_t tz_offset_s;
         } time_sync;
+        struct {
+            char cmd[32];   /* the command being acked: "owner", "name", "status", "unpair" */
+            bool ok;
+        } cmd_ack;
     };
 } proto_out_msg_t;
 

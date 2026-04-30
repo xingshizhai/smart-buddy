@@ -15,6 +15,7 @@ typedef enum {
     AGENT_EVT_AUDIO_RECORD_START,
     AGENT_EVT_AUDIO_RECORD_STOP,
     AGENT_EVT_TURN_COMPLETE,
+    AGENT_EVT_CMD,       /* incoming cmd from desktop — name + optional string value */
     AGENT_EVT_MAX,
 } agent_event_type_t;
 
@@ -32,6 +33,9 @@ typedef struct {
             uint32_t waiting;
             uint32_t tokens_total;
             uint32_t tokens_today;
+            char     msg[24];         /* one-line status from desktop */
+            char     entries[8][92];  /* transcript lines, newest first */
+            uint8_t  n_entries;
         } session;
         struct {
             char id[64];
@@ -56,6 +60,10 @@ typedef struct {
         struct {
             imu_gesture_t gesture;
         } imu;
+        struct {
+            char name[32];    /* "owner", "name", "status", "unpair" */
+            char value[64];   /* optional payload, e.g. owner/device name */
+        } cmd;
     } data;
     int64_t timestamp_us;
 } agent_event_t;

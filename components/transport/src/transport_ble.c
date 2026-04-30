@@ -180,8 +180,12 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
         ESP_LOGI(TAG, "subscribe attr=%d notify=%d",
                  event->subscribe.attr_handle, event->subscribe.cur_notify);
         if (event->subscribe.attr_handle == s_tx_attr_handle &&
-            event->subscribe.cur_notify && s_ctx->base.state_cb) {
-            /* Re-fire connected so agent_core sends device name after subscription */
+            event->subscribe.cur_notify && s_ctx->base.state_cb &&
+            s_ctx->state == TRANSPORT_STATE_CONNECTED) {
+            /* Re-fire connected so agent_core sends device name after subscription.
+             * Guard on state == CONNECTED: prevents a stale SUBSCRIBE event that
+             * arrives after BLE_GAP_EVENT_DISCONNECT from spuriously turning the
+             * UI indicator green when nothing is actually connected. */
             s_ctx->base.state_cb(TRANSPORT_ID_BLE, TRANSPORT_STATE_CONNECTED,
                                  s_ctx->base.cb_ctx);
         }

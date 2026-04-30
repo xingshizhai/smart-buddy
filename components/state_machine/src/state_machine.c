@@ -119,12 +119,14 @@ esp_err_t sm_post_event(sm_handle_t handle, const sm_event_t *evt)
         break;
 
     case SM_EVT_SESSION_STARTED:
-        if (s == SM_STATE_IDLE)
+        /* Also exit ATTENTION when a new session fires — prompt vanished externally */
+        if (s == SM_STATE_IDLE || s == SM_STATE_ATTENTION)
             enter_state(ctx, SM_STATE_BUSY, 0);
         break;
 
     case SM_EVT_SESSION_ENDED:
-        if (s == SM_STATE_BUSY)
+        /* Also exit ATTENTION when session ends — prompt resolved or timed out */
+        if (s == SM_STATE_BUSY || s == SM_STATE_ATTENTION)
             enter_state(ctx, SM_STATE_IDLE, 0);
         break;
 

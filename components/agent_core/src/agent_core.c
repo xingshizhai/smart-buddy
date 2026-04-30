@@ -82,22 +82,6 @@ static void send_approval_response(const char *id, bool approved)
     agent_stats_record_approval(approved);
 }
 
-static void send_device_name(void)
-{
-    proto_t *proto = proto_get_active();
-    if (!proto) return;
-
-    proto_out_msg_t msg = {
-        .type = PROTO_MSG_DEVICE_NAME,
-    };
-    strlcpy(msg.device.name, transport_ble_get_device_name(), sizeof(msg.device.name));
-
-    uint8_t *enc = NULL; size_t enc_len = 0;
-    if (proto->encode(proto, &msg, &enc, &enc_len) == ESP_OK) {
-        transport_send_all(enc, enc_len);
-        free(enc);
-    }
-}
 
 static void send_time_sync(void)
 {
@@ -139,12 +123,9 @@ static void agent_task(void *arg)
                 sm_evt.type = SM_EVT_TRANSPORT_CONNECTED;
                 sm_post_event(s_sm, &sm_evt);
                 send_time_sync();
-                if (tid == TRANSPORT_ID_BLE)
-                    send_device_name();
             } else if (connected && s_transport_up[tid] && tid == TRANSPORT_ID_BLE) {
-                /* Re-fired after CCCD subscription — send device name now */
-                ESP_LOGI(TAG, "BLE subscribed, sending device name");
-                send_device_name();
+                /* Re-fired after CCCD subscription — desktop will send owner/name cmds */
+                ESP_LOGI(TAG, "BLE subscribed");
             } else if (!connected && s_transport_up[tid]) {
                 s_transport_up[tid] = false;
                 s_connected_count--;
@@ -170,10 +151,14 @@ static void agent_task(void *arg)
                 sm_evt.type = SM_EVT_SESSION_ENDED;
                 sm_post_event(s_sm, &sm_evt);
             }
-            /* Update stats + token display */
+            /* Update stats + display */
             agent_stats_update_tokens(evt.data.session.tokens_total,
                                        evt.data.session.tokens_today);
             ui_screen_main_set_token_count(evt.data.session.tokens_total);
+            ui_screen_main_set_msg(evt.data.session.msg);
+            ui_screen_main_set_entries(
+                (const char (*)[92])evt.data.session.entries,
+                evt.data.session.n_entries);
             break;
         }
 
@@ -222,6 +207,29 @@ static void agent_task(void *arg)
                 esp_timer_start_once(s_turn_timer, 1500 * 1000);
             }
             break;
+
+        case AGENT_EVT_CMD: {
+            /* Incoming desktop command — send required ack per protocol spec.
+             * Without acks the desktop may withhold heartbeats. */
+            const char *cmd = evt.data.cmd.name;
+            ESP_LOGI(TAG, "cmd: %s value=%s", cmd, evt.data.cmd.value);
+
+            proto_t *proto = proto_get_active();
+            if (!proto) break;
+
+            proto_out_msg_t ack = {
+                .type = PROTO_MSG_CMD_ACK,
+                .cmd_ack = {.ok = true},
+            };
+            strlcpy(ack.cmd_ack.cmd, cmd, sizeof(ack.cmd_ack.cmd));
+
+            uint8_t *enc = NULL; size_t enc_len = 0;
+            if (proto->encode(proto, &ack, &enc, &enc_len) == ESP_OK) {
+                transport_send_all(enc, enc_len);
+                free(enc);
+            }
+            break;
+        }
 
         default:
             break;

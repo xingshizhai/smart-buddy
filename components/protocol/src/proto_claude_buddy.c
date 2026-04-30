@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_system.h"
 #include "cJSON.h"
 #include "protocol/protocol.h"
 
@@ -87,6 +88,24 @@ static esp_err_t claude_buddy_decode(proto_t *proto,
         e->data.session.tokens_today = tokens_today_j ? (uint32_t)tokens_today_j->valuedouble : 0;
         e->timestamp_us = esp_timer_get_time();
 
+        /* Optional display fields */
+        cJSON *msg_j = cJSON_GetObjectItem(root, "msg");
+        if (cJSON_IsString(msg_j))
+            strlcpy(e->data.session.msg, msg_j->valuestring,
+                    sizeof(e->data.session.msg));
+
+        cJSON *entries_j = cJSON_GetObjectItem(root, "entries");
+        if (cJSON_IsArray(entries_j)) {
+            int n = cJSON_GetArraySize(entries_j);
+            if (n > 8) n = 8;
+            for (int i = 0; i < n; i++) {
+                cJSON *item = cJSON_GetArrayItem(entries_j, i);
+                if (cJSON_IsString(item))
+                    strlcpy(e->data.session.entries[i], item->valuestring, 92);
+            }
+            e->data.session.n_entries = (uint8_t)n;
+        }
+
         /* Token milestone */
         uint32_t tok = e->data.session.tokens_total;
         if (tok >= ctx->token_milestone &&
@@ -148,6 +167,22 @@ static esp_err_t claude_buddy_decode(proto_t *proto,
         ESP_LOGI(TAG, "turn complete: assistant response received");
     }
 
+    /* Commands from desktop: {"cmd":"owner"|"name"|"status"|"unpair",...}
+     * Generate AGENT_EVT_CMD so agent_core can send the required ack. */
+    cJSON *cmd_j = cJSON_GetObjectItem(root, "cmd");
+    if (cJSON_IsString(cmd_j) && idx < max_events) {
+        agent_event_t *ce = &out_events[idx++];
+        memset(ce, 0, sizeof(*ce));
+        ce->type = AGENT_EVT_CMD;
+        strlcpy(ce->data.cmd.name, cmd_j->valuestring, sizeof(ce->data.cmd.name));
+        /* Capture the optional string value (present for "name" and "owner") */
+        cJSON *val_j = cJSON_GetObjectItem(root, "name");
+        if (cJSON_IsString(val_j))
+            strlcpy(ce->data.cmd.value, val_j->valuestring, sizeof(ce->data.cmd.value));
+        ce->timestamp_us = esp_timer_get_time();
+        ESP_LOGI(TAG, "cmd received: %s", ce->data.cmd.name);
+    }
+
     *n_events = idx;
     cJSON_Delete(root);
     return ESP_OK;
@@ -174,13 +209,30 @@ static esp_err_t claude_buddy_encode(proto_t *proto,
         break;
 
     case PROTO_MSG_DEVICE_NAME:
-        cJSON_AddStringToObject(root, "cmd", "name");
-        cJSON_AddStringToObject(root, "name", msg->device.name);
-        break;
+        /* Intentionally empty — device name is already in BLE advertising;
+         * no standard protocol message exists for device→desktop name push. */
+        cJSON_Delete(root);
+        return ESP_ERR_NOT_SUPPORTED;
 
     case PROTO_MSG_STATUS_REQUEST:
-        cJSON_AddStringToObject(root, "cmd", "status");
+        /* Desktop polls {"cmd":"status"}; device responds via PROTO_MSG_CMD_ACK. */
+        cJSON_Delete(root);
+        return ESP_ERR_NOT_SUPPORTED;
+
+    case PROTO_MSG_CMD_ACK: {
+        cJSON_AddStringToObject(root, "ack", msg->cmd_ack.cmd);
+        cJSON_AddBoolToObject(root, "ok", msg->cmd_ack.ok);
+        /* For "status", add minimal data block so the Hardware Buddy window shows stats */
+        if (strcmp(msg->cmd_ack.cmd, "status") == 0) {
+            cJSON *data = cJSON_CreateObject();
+            cJSON_AddFalseToObject(data, "sec");
+            cJSON *sys = cJSON_CreateObject();
+            cJSON_AddNumberToObject(sys, "heap", (double)esp_get_free_heap_size());
+            cJSON_AddItemToObject(data, "sys", sys);
+            cJSON_AddItemToObject(root, "data", data);
+        }
         break;
+    }
 
     case PROTO_MSG_TIME_SYNC: {
         cJSON *arr = cJSON_CreateArray();

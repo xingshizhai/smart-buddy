@@ -42,10 +42,18 @@ lv_obj_t *screen_ble_debug_create(void);
 void      ui_screen_ble_debug_on_show(void);
 void      ui_screen_ble_debug_on_hide(void);
 
+#define MAIN_ENTRY_LINES  8
+#define MAIN_STATUS_H    28
+#define MAIN_MSG_H       22
+#define MAIN_ENTRY_H     23
+#define MAIN_TRANSCRIPT_Y (MAIN_STATUS_H + MAIN_MSG_H + 2)  /* 52 */
+
 /* Main screen state label, token label, and BLE indicator (updated externally) */
 static lv_obj_t *s_main_state_label  = NULL;
 static lv_obj_t *s_main_token_label  = NULL;
 static lv_obj_t *s_ble_indicator     = NULL;
+static lv_obj_t *s_main_msg_label    = NULL;
+static lv_obj_t *s_entry_labels[MAIN_ENTRY_LINES] = {0};
 static lv_obj_t *s_approval_tool     = NULL;
 static lv_obj_t *s_approval_hint     = NULL;
 static char       s_approval_id_store[64];
@@ -157,29 +165,20 @@ static lv_obj_t *screen_main_create(void)
 {
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Status bar — purely decorative strip at the top */
+    /* ── Status bar ───────────────────────────────────────────────── */
     lv_obj_t *bar = lv_obj_create(scr);
-    lv_obj_set_size(bar, 320, 28);
+    lv_obj_set_size(bar, 320, MAIN_STATUS_H);
     lv_obj_align(bar, LV_ALIGN_TOP_LEFT, 0, 0);
-    lv_obj_set_style_bg_color(bar, lv_color_make(0x20, 0x20, 0x20), 0);
+    lv_obj_set_style_bg_color(bar, lv_color_make(0x1A, 0x1A, 0x1A), 0);
     lv_obj_set_style_border_width(bar, 0, 0);
     lv_obj_set_style_radius(bar, 0, 0);
     lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Token counter — right side of status bar, placed on scr to avoid clipping */
-    s_main_token_label = lv_label_create(scr);
-    lv_label_set_text(s_main_token_label, "0 tok");
-    lv_obj_set_style_text_color(s_main_token_label, lv_color_white(), 0);
-    lv_obj_align(s_main_token_label, LV_ALIGN_TOP_RIGHT, -8, 6);
-
-    /*
-     * Settings button — placed directly on scr (not inside bar) so it is
-     * never clipped by the container's OVERFLOW_HIDDEN boundary.
-     * Tap it to open the Settings screen.
-     */
+    /* Settings button */
     lv_obj_t *btn_cfg = lv_btn_create(scr);
-    lv_obj_set_size(btn_cfg, 36, 28);
+    lv_obj_set_size(btn_cfg, 36, MAIN_STATUS_H);
     lv_obj_align(btn_cfg, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_obj_set_style_bg_color(btn_cfg, lv_color_make(0x38, 0x38, 0x38), 0);
     lv_obj_set_style_bg_color(btn_cfg, lv_color_make(0x60, 0x60, 0x60), LV_STATE_PRESSED);
@@ -189,29 +188,80 @@ static lv_obj_t *screen_main_create(void)
     lv_obj_add_event_cb(btn_cfg, main_settings_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *icon = lv_label_create(btn_cfg);
     lv_label_set_text(icon, LV_SYMBOL_SETTINGS);
-    lv_obj_set_style_text_color(icon, lv_color_make(0xDD, 0xDD, 0xDD), 0);
-    lv_obj_set_style_text_font(icon, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(icon, lv_color_make(0xBB, 0xBB, 0xBB), 0);
+    lv_obj_set_style_text_font(icon, &lv_font_montserrat_14, 0);
     lv_obj_center(icon);
 
-    /* BLE status indicator — bluetooth symbol, grey=disconnected, green=connected */
+    /* BLE indicator */
     s_ble_indicator = lv_label_create(scr);
     lv_label_set_text(s_ble_indicator, LV_SYMBOL_BLUETOOTH);
     lv_obj_set_style_text_color(s_ble_indicator, lv_color_make(0x55, 0x55, 0x55), 0);
-    lv_obj_set_style_text_font(s_ble_indicator, &lv_font_montserrat_16, 0);
-    lv_obj_align(s_ble_indicator, LV_ALIGN_TOP_LEFT, 44, 6);
+    lv_obj_set_style_text_font(s_ble_indicator, &lv_font_montserrat_14, 0);
+    lv_obj_align(s_ble_indicator, LV_ALIGN_TOP_LEFT, 42, 7);
 
-    /* Avatar placeholder */
-    lv_obj_t *avatar = lv_label_create(scr);
-    lv_label_set_text(avatar, "(^_^)");
-    lv_obj_set_style_text_color(avatar, lv_color_white(), 0);
-    lv_obj_set_style_text_font(avatar, &lv_font_montserrat_24, 0);
-    lv_obj_align(avatar, LV_ALIGN_CENTER, 0, -20);
-
-    /* State label */
+    /* State label — in status bar, after BLE icon */
     s_main_state_label = lv_label_create(scr);
     lv_label_set_text(s_main_state_label, s_state_labels[SM_STATE_SLEEP]);
-    lv_obj_set_style_text_color(s_main_state_label, lv_color_make(0x80, 0x80, 0x80), 0);
-    lv_obj_align(s_main_state_label, LV_ALIGN_CENTER, 0, 40);
+    lv_obj_set_style_text_color(s_main_state_label, lv_color_make(0x88, 0x88, 0x88), 0);
+    lv_obj_set_style_text_font(s_main_state_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_size(s_main_state_label, 140, MAIN_STATUS_H);
+    lv_label_set_long_mode(s_main_state_label, LV_LABEL_LONG_CLIP);
+    lv_obj_align(s_main_state_label, LV_ALIGN_TOP_LEFT, 62, 7);
+
+    /* Token counter — right side of status bar */
+    s_main_token_label = lv_label_create(scr);
+    lv_label_set_text(s_main_token_label, "0 tok");
+    lv_obj_set_style_text_color(s_main_token_label, lv_color_make(0x99, 0x99, 0x99), 0);
+    lv_obj_set_style_text_font(s_main_token_label, &lv_font_montserrat_14, 0);
+    lv_obj_align(s_main_token_label, LV_ALIGN_TOP_RIGHT, -6, 7);
+
+    /* ── Thin separator after status bar ──────────────────────────── */
+    lv_obj_t *sep1 = lv_obj_create(scr);
+    lv_obj_set_size(sep1, 320, 1);
+    lv_obj_align(sep1, LV_ALIGN_TOP_LEFT, 0, MAIN_STATUS_H);
+    lv_obj_set_style_bg_color(sep1, lv_color_make(0x33, 0x33, 0x33), 0);
+    lv_obj_set_style_border_width(sep1, 0, 0);
+    lv_obj_set_style_radius(sep1, 0, 0);
+
+    /* ── Msg bar (current status from Claude) ─────────────────────── */
+    lv_obj_t *msg_bar = lv_obj_create(scr);
+    lv_obj_set_size(msg_bar, 320, MAIN_MSG_H);
+    lv_obj_align(msg_bar, LV_ALIGN_TOP_LEFT, 0, MAIN_STATUS_H + 1);
+    lv_obj_set_style_bg_color(msg_bar, lv_color_make(0x0D, 0x0D, 0x0D), 0);
+    lv_obj_set_style_border_width(msg_bar, 0, 0);
+    lv_obj_set_style_radius(msg_bar, 0, 0);
+    lv_obj_clear_flag(msg_bar, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_main_msg_label = lv_label_create(scr);
+    lv_label_set_text(s_main_msg_label, "");
+    lv_obj_set_style_text_color(s_main_msg_label, lv_color_make(0x55, 0x55, 0x55), 0);
+    lv_obj_set_style_text_font(s_main_msg_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_size(s_main_msg_label, 314, MAIN_MSG_H);
+    lv_label_set_long_mode(s_main_msg_label, LV_LABEL_LONG_CLIP);
+    lv_obj_align(s_main_msg_label, LV_ALIGN_TOP_LEFT, 4, MAIN_STATUS_H + 3);
+
+    /* ── Thin separator after msg bar ────────────────────────────── */
+    lv_obj_t *sep2 = lv_obj_create(scr);
+    lv_obj_set_size(sep2, 320, 1);
+    lv_obj_align(sep2, LV_ALIGN_TOP_LEFT, 0, MAIN_STATUS_H + MAIN_MSG_H + 1);
+    lv_obj_set_style_bg_color(sep2, lv_color_make(0x22, 0x22, 0x22), 0);
+    lv_obj_set_style_border_width(sep2, 0, 0);
+    lv_obj_set_style_radius(sep2, 0, 0);
+
+    /* ── Transcript entry lines (newest at top) ───────────────────── */
+    /* Brightness fades from white (newest) to dim (oldest) */
+    static const uint8_t entry_bright[] = {0xFF, 0xCC, 0xAA, 0x88, 0x66, 0x55, 0x44, 0x44};
+    for (int i = 0; i < MAIN_ENTRY_LINES; i++) {
+        s_entry_labels[i] = lv_label_create(scr);
+        lv_label_set_text(s_entry_labels[i], "");
+        uint8_t b = entry_bright[i];
+        lv_obj_set_style_text_color(s_entry_labels[i], lv_color_make(b, b, b), 0);
+        lv_obj_set_style_text_font(s_entry_labels[i], &lv_font_montserrat_14, 0);
+        lv_obj_set_size(s_entry_labels[i], 314, MAIN_ENTRY_H);
+        lv_label_set_long_mode(s_entry_labels[i], LV_LABEL_LONG_CLIP);
+        lv_obj_align(s_entry_labels[i], LV_ALIGN_TOP_LEFT,
+                     4, MAIN_TRANSCRIPT_Y + i * MAIN_ENTRY_H);
+    }
 
     return scr;
 }
@@ -559,6 +609,35 @@ void ui_screen_main_set_ble_connected(bool connected)
         }
         lvgl_port_unlock();
     }
+}
+
+void ui_screen_main_set_msg(const char *msg)
+{
+    if (!msg) msg = "";
+    if (!lvgl_port_lock(100)) return;
+    if (s_main_msg_label) {
+        lv_label_set_text(s_main_msg_label, msg);
+        /* Amber when there's content, dim grey when empty/ready */
+        bool active = msg[0] && strcmp(msg, "ready") != 0;
+        lv_color_t c = active
+            ? lv_color_make(0xCC, 0x88, 0x00)
+            : lv_color_make(0x44, 0x44, 0x44);
+        lv_obj_set_style_text_color(s_main_msg_label, c, 0);
+    }
+    lvgl_port_unlock();
+}
+
+void ui_screen_main_set_entries(const char (*entries)[92], uint8_t n)
+{
+    if (!lvgl_port_lock(100)) return;
+    for (int i = 0; i < MAIN_ENTRY_LINES; i++) {
+        if (!s_entry_labels[i]) continue;
+        if (i < n && entries[i][0])
+            lv_label_set_text(s_entry_labels[i], entries[i]);
+        else
+            lv_label_set_text(s_entry_labels[i], "");
+    }
+    lvgl_port_unlock();
 }
 
 void ui_screen_approval_set_prompt(const char *tool, const char *hint, const char *id)

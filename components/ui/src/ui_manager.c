@@ -53,6 +53,7 @@ static lv_obj_t *s_main_state_label  = NULL;
 static lv_obj_t *s_main_token_label  = NULL;
 static lv_obj_t *s_ble_indicator     = NULL;
 static lv_obj_t *s_main_msg_label    = NULL;
+static lv_obj_t *s_passkey_label     = NULL;
 static lv_obj_t *s_entry_labels[MAIN_ENTRY_LINES] = {0};
 static lv_obj_t *s_approval_tool     = NULL;
 static lv_obj_t *s_approval_hint     = NULL;
@@ -262,6 +263,18 @@ static lv_obj_t *screen_main_create(void)
         lv_obj_align(s_entry_labels[i], LV_ALIGN_TOP_LEFT,
                      4, MAIN_TRANSCRIPT_Y + i * MAIN_ENTRY_H);
     }
+
+    /* ── Passkey overlay (hidden by default, shown during BLE pairing) ─ */
+    s_passkey_label = lv_label_create(scr);
+    lv_label_set_text(s_passkey_label, "");
+    lv_obj_set_style_text_color(s_passkey_label, lv_color_make(0xFF, 0xCC, 0x00), 0);
+    lv_obj_set_style_text_font(s_passkey_label, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_bg_color(s_passkey_label, lv_color_make(0x00, 0x00, 0x00), 0);
+    lv_obj_set_style_bg_opa(s_passkey_label, LV_OPA_COVER, 0);
+    lv_obj_set_size(s_passkey_label, 320, 240);
+    lv_obj_align(s_passkey_label, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_text_align(s_passkey_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_add_flag(s_passkey_label, LV_OBJ_FLAG_HIDDEN);
 
     return scr;
 }
@@ -609,6 +622,23 @@ void ui_screen_main_set_ble_connected(bool connected)
         }
         lvgl_port_unlock();
     }
+}
+
+void ui_screen_main_set_passkey(uint32_t passkey)
+{
+    if (!lvgl_port_lock(100)) return;
+    if (s_passkey_label) {
+        if (passkey > 0) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "BLE Pairing\nEnter on desktop:\n\n%06lu", (unsigned long)passkey);
+            lv_label_set_text(s_passkey_label, buf);
+            lv_obj_clear_flag(s_passkey_label, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_label_set_text(s_passkey_label, "");
+            lv_obj_add_flag(s_passkey_label, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+    lvgl_port_unlock();
 }
 
 void ui_screen_main_set_msg(const char *msg)

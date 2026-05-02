@@ -13,11 +13,6 @@ menu "Smart-Buddy Configuration"
             default ""
             depends on TRANSPORT_BLE_ENABLED
 
-        config TRANSPORT_BLE_REQUIRE_BONDING
-            bool "Require BLE Secure Connection bonding"
-            default n
-            depends on TRANSPORT_BLE_ENABLED
-
         config TRANSPORT_WS_ENABLED
             bool "Enable Wi-Fi WebSocket transport"
             default y

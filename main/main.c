@@ -65,8 +65,21 @@ static void ptt_button_cb(hal_button_id_t id, hal_button_event_t evt, void *ctx)
 
 static void heartbeat_task(void *arg)
 {
+    uint32_t last_passkey = 0;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(HEARTBEAT_INTERVAL_MS));
+
+        /* Poll passkey for pairing screen display (always, even without proto) */
+        uint32_t pk = transport_ble_get_passkey();
+        if (pk != last_passkey) {
+            last_passkey = pk;
+            ui_screen_main_set_passkey(pk);
+            if (pk > 0) {
+                ESP_LOGI(TAG, "=== BLE PAIRING: enter passkey %06lu on desktop ===",
+                         (unsigned long)pk);
+            }
+        }
+
         proto_t *proto = proto_get_active();
         if (!proto) continue;
 

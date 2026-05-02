@@ -2,16 +2,19 @@
 #if CONFIG_TRANSPORT_BLE_ENABLED
 
 #include <string.h>
+#include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 #include "esp_mac.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
 #include "host/ble_gap.h"
+#include "host/ble_sm.h"
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
@@ -35,16 +38,16 @@
     0x9E,0xCA,0xDC,0x24, 0x0E,0xE5, 0xA9,0xE0, \
     0x93,0xF3, 0xA3,0xB5, 0x03,0x00,0x40,0x6E
 
-/* Characteristic security flags — Claude app requires encrypted writes */
-#if CONFIG_TRANSPORT_BLE_REQUIRE_BONDING
-#define NUS_RX_CHR_FLAGS \
-    (BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_WRITE_ENC)
-#define NUS_TX_CHR_FLAGS \
-    (BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_READ_ENC)
-#else
+/*
+ * Characteristic security flags.
+ * NUS characteristics support plaintext writes so the desktop can send
+ * heartbeats without pairing. LE Secure Connections with passkey pairing
+ * is configured in ble_on_sync() for users who want an encrypted link;
+ * characteristics stay open to avoid blocking data flow when pairing
+ * doesn't complete (e.g. first connection, no desktop UI focus).
+ */
 #define NUS_RX_CHR_FLAGS (BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP)
 #define NUS_TX_CHR_FLAGS (BLE_GATT_CHR_F_NOTIFY)
-#endif
 
 typedef struct {
     transport_t         base;
@@ -60,6 +63,10 @@ typedef struct {
 static ble_ctx_t *s_ctx = NULL;
 /* Static handle written by NimBLE GATT registration */
 static uint16_t   s_tx_attr_handle = 0;
+
+/* Security / passkey state */
+static uint32_t s_passkey = 0;
+static bool     s_secure  = false;
 
 static int ble_gap_event_cb(struct ble_gap_event *event, void *arg);
 static void ble_start_advertising(void);
@@ -121,15 +128,18 @@ static void ble_on_sync(void)
     ble_hs_util_ensure_addr(0);
     ble_att_set_preferred_mtu(512);
 
-#if CONFIG_TRANSPORT_BLE_REQUIRE_BONDING
-    /* Claude app requires encrypted connection — enable SC bonding */
-    ble_hs_cfg.sm_io_cap        = BLE_SM_IO_CAP_NO_IO;
-    ble_hs_cfg.sm_bonding       = 1;
-    ble_hs_cfg.sm_mitm          = 0;
-    ble_hs_cfg.sm_sc            = 1;   /* LE Secure Connections */
-    ble_hs_cfg.sm_our_key_dist  = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    /*
+     * Claude Desktop requires LE Secure Connections with passkey pairing.
+     * IO capability DISPLAY_ONLY: device shows 6-digit passkey on screen,
+     * user types it into the desktop app (KeyboardOnly on central side).
+     * MITM + SC + bonding provides encrypted link with replay protection.
+     */
+    ble_hs_cfg.sm_io_cap         = BLE_SM_IO_CAP_DISP_ONLY;
+    ble_hs_cfg.sm_bonding        = 1;
+    ble_hs_cfg.sm_mitm           = 1;
+    ble_hs_cfg.sm_sc             = 1;
+    ble_hs_cfg.sm_our_key_dist   = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
-#endif
 
     ble_start_advertising();
 }
@@ -158,11 +168,19 @@ static void ble_start_advertising(void)
     };
     ble_gap_adv_set_fields(&adv_fields);
 
+    /*
+     * Slave Connection Interval Range (AD type 0x12).
+     * 4 bytes: min (uint16 LE), max (uint16 LE), units of 1.25 ms.
+     * 6 = 7.5 ms, 18 = 22.5 ms. macOS uses these for optimal params.
+     */
+    static const uint8_t slave_itvl_data[4] = {0x06, 0x00, 0x12, 0x00};
+
     const char *name = s_ctx ? s_ctx->device_name : CONFIG_TRANSPORT_BLE_DEVICE_NAME;
     struct ble_hs_adv_fields rsp_fields = {
-        .name             = (const uint8_t *)name,
-        .name_len         = strlen(name),
-        .name_is_complete = 1,
+        .name               = (const uint8_t *)name,
+        .name_len           = strlen(name),
+        .name_is_complete   = 1,
+        .slave_itvl_range   = slave_itvl_data,
     };
     ble_gap_adv_rsp_set_fields(&rsp_fields);
 
@@ -208,6 +226,8 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
         ESP_LOGI(TAG, "disconnected reason=%d", event->disconnect.reason);
         s_ctx->conn_handle = BLE_HS_CONN_HANDLE_NONE;
         s_ctx->state = TRANSPORT_STATE_DISCONNECTED;
+        s_secure  = false;
+        s_passkey = 0;
         if (s_ctx->base.state_cb)
             s_ctx->base.state_cb(TRANSPORT_ID_BLE, TRANSPORT_STATE_DISCONNECTED,
                                  s_ctx->base.cb_ctx);
@@ -217,10 +237,57 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
         ESP_LOGI(TAG, "MTU updated: %d", event->mtu.value);
         if (s_ctx) s_ctx->mtu = event->mtu.value;
         break;
+
+    case BLE_GAP_EVENT_PASSKEY_ACTION: {
+        /*
+         * LE Secure Connections pairing with DISPLAY_ONLY capability.
+         * The application MUST generate a random 6-digit passkey, display it,
+         * and inject it via ble_sm_inject_io(). The user then types it on the
+         * desktop (KeyboardOnly on the central side).
+         */
+        if (event->passkey.params.action == BLE_SM_IOACT_DISP) {
+            s_passkey = 100000 + esp_random() % 900000;
+            struct ble_sm_io io = {
+                .action = BLE_SM_IOACT_DISP,
+                .passkey = s_passkey,
+            };
+            ble_sm_inject_io(event->passkey.conn_handle, &io);
+            ESP_LOGI(TAG, "=== PASSKEY: %06lu (display on screen) ===",
+                     (unsigned long)s_passkey);
+        } else if (event->passkey.params.action == BLE_SM_IOACT_NUMCMP) {
+            /* Numeric comparison - auto-accept for peripheral role */
+            struct ble_sm_io io = {
+                .action = BLE_SM_IOACT_NUMCMP,
+                .numcmp_accept = 1,
+            };
+            ble_sm_inject_io(event->passkey.conn_handle, &io);
+        }
+        break;
+    }
+
+    case BLE_GAP_EVENT_ENC_CHANGE:
+        s_secure = (event->enc_change.status == 0);
+        ESP_LOGI(TAG, "encryption %s (status=%d)",
+                 s_secure ? "OK" : "FAIL", event->enc_change.status);
+        if (!s_secure) {
+            s_passkey = 0;
+        }
+        break;
+
     default:
         break;
     }
     return 0;
+}
+
+bool transport_ble_is_secure(void)
+{
+    return s_secure;
+}
+
+uint32_t transport_ble_get_passkey(void)
+{
+    return s_passkey;
 }
 
 static esp_err_t ble_tp_init(transport_t *t, const void *cfg)

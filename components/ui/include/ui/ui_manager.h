@@ -37,6 +37,7 @@ void ui_screen_main_set_token_count(uint32_t tokens);
 void ui_screen_main_set_ble_connected(bool connected);
 void ui_screen_main_set_msg(const char *msg);
 void ui_screen_main_set_entries(const char (*entries)[92], uint8_t n);
+void ui_screen_main_set_passkey(uint32_t passkey);
 void ui_screen_approval_set_prompt(const char *tool, const char *hint, const char *id);
 void ui_screen_approval_resolve(bool approved);
 void ui_screen_status_refresh(void);

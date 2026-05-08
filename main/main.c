@@ -46,8 +46,14 @@ static sm_handle_t s_sm = NULL;
 
 static void ptt_button_cb(hal_button_id_t id, hal_button_event_t evt, void *ctx)
 {
-    agent_event_t agent_evt = { .timestamp_us = esp_timer_get_time() };
+    /* During ATTENTION state, BOOT acts as B-key (Deny) */
+    if (sm_get_state(s_sm) == SM_STATE_ATTENTION) {
+        if (evt == HAL_BTN_EVT_PRESS_DOWN)
+            ui_approval_handle_key(false);
+        return;
+    }
 
+    agent_event_t agent_evt = { .timestamp_us = esp_timer_get_time() };
     if (evt == HAL_BTN_EVT_PRESS_DOWN) {
         audio_manager_record_start();
         agent_evt.type = AGENT_EVT_AUDIO_RECORD_START;
@@ -59,6 +65,22 @@ static void ptt_button_cb(hal_button_id_t id, hal_button_event_t evt, void *ctx)
         agent_core_post_event(&agent_evt);
         ESP_LOGI("PTT", "recording stopped");
     }
+}
+
+/* A-key / BOOT long-press: Approve in ATTENTION; simulate turn-complete otherwise */
+static void approve_button_cb(hal_button_id_t id, hal_button_event_t evt, void *ctx)
+{
+    if (sm_get_state(s_sm) == SM_STATE_ATTENTION) {
+        ui_approval_handle_key(true);
+        return;
+    }
+    /* IDLE or any non-ATTENTION state: simulate a completed turn to test BUSY flash */
+    agent_event_t test_evt = {
+        .type = AGENT_EVT_TURN_COMPLETE,
+        .timestamp_us = esp_timer_get_time(),
+    };
+    agent_core_post_event(&test_evt);
+    ESP_LOGI("BTN", "simulated turn-complete (state=%d)", sm_get_state(s_sm));
 }
 
 /* ── Periodic tasks ─────────────────────────────────────────────────── */
@@ -192,10 +214,16 @@ void app_main(void)
     /* 9b. Audio manager tasks + PTT button (BTN_0 = center/mute button) */
     ESP_ERROR_CHECK(audio_manager_start());
     if (g_hal.buttons) {
+        /* BOOT: PTT short-press; long-press simulates turn-complete for state testing */
         g_hal.buttons->register_cb(g_hal.buttons, HAL_BTN_BOOT,
                                     HAL_BTN_EVT_PRESS_DOWN, ptt_button_cb, NULL);
         g_hal.buttons->register_cb(g_hal.buttons, HAL_BTN_BOOT,
                                     HAL_BTN_EVT_PRESS_UP,   ptt_button_cb, NULL);
+        g_hal.buttons->register_cb(g_hal.buttons, HAL_BTN_BOOT,
+                                    HAL_BTN_EVT_LONG_PRESS, approve_button_cb, NULL);
+        /* LEFT (mute): Approve (A-key) during ATTENTION */
+        g_hal.buttons->register_cb(g_hal.buttons, HAL_BTN_LEFT,
+                                    HAL_BTN_EVT_PRESS_DOWN, approve_button_cb, NULL);
     }
 
     /* 10. Periodic background tasks */

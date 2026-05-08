@@ -69,11 +69,23 @@ static esp_err_t claude_buddy_decode(proto_t *proto,
 
     size_t idx = 0;
 
-    cJSON *running_j     = cJSON_GetObjectItem(root, "running");
-    cJSON *waiting_j     = cJSON_GetObjectItem(root, "waiting");
-    cJSON *tokens_j      = cJSON_GetObjectItem(root, "tokens");
+    cJSON *running_j      = cJSON_GetObjectItem(root, "running");
+    cJSON *waiting_j      = cJSON_GetObjectItem(root, "waiting");
+    cJSON *tokens_j       = cJSON_GetObjectItem(root, "tokens");
     cJSON *tokens_today_j = cJSON_GetObjectItem(root, "tokens_today");
-    cJSON *total_j       = cJSON_GetObjectItem(root, "total");
+    cJSON *total_j        = cJSON_GetObjectItem(root, "total");
+    cJSON *completed_j    = cJSON_GetObjectItem(root, "completed");
+
+    /* "completed": true — Claude Desktop signals a turn just finished.
+     * Fire TURN_COMPLETE before the session update so the SM sees BUSY
+     * for 1.5 s regardless of whether running > 0. */
+    if (cJSON_IsTrue(completed_j) && idx < max_events) {
+        agent_event_t *ce = &out_events[idx++];
+        memset(ce, 0, sizeof(*ce));
+        ce->type = AGENT_EVT_TURN_COMPLETE;
+        ce->timestamp_us = esp_timer_get_time();
+        ESP_LOGI(TAG, "turn complete (completed=true)");
+    }
 
     /* Heartbeat: has any of running / waiting / tokens / total */
     if ((running_j || waiting_j || tokens_j || tokens_today_j || total_j)

@@ -32,6 +32,10 @@ static int  s_connected_count = 0;
 /* Turn-complete: briefly flash BUSY for 1.5 s then auto-return to IDLE */
 static esp_timer_handle_t s_turn_timer = NULL;
 
+/* Last known msg/running for change detection */
+static char    s_last_msg[24]     = {0};
+static uint8_t s_last_running     = 0;
+
 static void turn_timer_cb(void *arg)
 {
     sm_event_t e = {.type = SM_EVT_SESSION_ENDED, .timestamp_us = esp_timer_get_time()};
@@ -122,10 +126,15 @@ static void agent_task(void *arg)
                 s_connected_count++;
                 sm_evt.type = SM_EVT_TRANSPORT_CONNECTED;
                 sm_post_event(s_sm, &sm_evt);
-                send_time_sync();
+                /* For BLE: defer time_sync until CCCD subscription (re-fire below).
+                 * The cccd_subscribed guard in ble_tp_send blocks notifications
+                 * until then — sending before CCCD causes macOS to disconnect. */
+                if (tid != TRANSPORT_ID_BLE)
+                    send_time_sync();
             } else if (connected && s_transport_up[tid] && tid == TRANSPORT_ID_BLE) {
-                /* Re-fired after CCCD subscription — desktop will send owner/name cmds */
-                ESP_LOGI(TAG, "BLE subscribed");
+                /* Re-fired after CCCD subscription — safe to send notifications now */
+                ESP_LOGI(TAG, "BLE CCCD subscribed, sending time sync");
+                send_time_sync();
             } else if (!connected && s_transport_up[tid]) {
                 s_transport_up[tid] = false;
                 s_connected_count--;
@@ -142,7 +151,9 @@ static void agent_task(void *arg)
         case AGENT_EVT_SESSION_UPDATE: {
             uint32_t running = evt.data.session.running;
             uint32_t waiting = evt.data.session.waiting;
-            /* Drive state machine: waiting sessions take priority over running */
+            const char *new_msg = evt.data.session.msg;
+
+            /* Primary: waiting/running fields drive the state machine */
             if (waiting == 0 && running > 0) {
                 sm_evt.type = SM_EVT_SESSION_STARTED;
                 sm_post_event(s_sm, &sm_evt);
@@ -151,6 +162,24 @@ static void agent_task(void *arg)
                 sm_evt.type = SM_EVT_SESSION_ENDED;
                 sm_post_event(s_sm, &sm_evt);
             }
+
+            /* Fallback: msg changed to non-idle while running==0 — Desktop may
+             * not set running>0 for regular chat turns; a msg change is the
+             * next-best signal.  Only use when primary signals are absent so we
+             * don't duplicate or override an active session. */
+            bool msg_changed = new_msg[0] && strcmp(new_msg, s_last_msg) != 0;
+            bool msg_active  = msg_changed && running == 0 && waiting == 0
+                               && (strstr(new_msg, "idle") == NULL);
+            if (msg_active && s_turn_timer) {
+                ESP_LOGI(TAG, "activity detected via msg: %s", new_msg);
+                sm_evt.type = SM_EVT_SESSION_STARTED;
+                sm_post_event(s_sm, &sm_evt);
+                esp_timer_stop(s_turn_timer);
+                esp_timer_start_once(s_turn_timer, 1500 * 1000);
+            }
+            s_last_running = (uint8_t)(running > 255 ? 255 : running);
+            strlcpy(s_last_msg, new_msg, sizeof(s_last_msg));
+
             /* Update stats + display */
             agent_stats_update_tokens(evt.data.session.tokens_total,
                                        evt.data.session.tokens_today);

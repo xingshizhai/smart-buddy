@@ -3,6 +3,8 @@ idf_component_register(
         "src/ui_manager.c"
         "src/ui_screen_debug.c"
         "src/ui_screen_ble_debug.c"
+        "src/persona_data.c"
+        "src/persona_driver.c"
     INCLUDE_DIRS "include"
     REQUIRES
         buddy_hal

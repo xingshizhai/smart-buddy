@@ -40,5 +40,6 @@ void ui_screen_main_set_entries(const char (*entries)[92], uint8_t n);
 void ui_screen_main_set_passkey(uint32_t passkey);
 void ui_screen_approval_set_prompt(const char *tool, const char *hint, const char *id);
 void ui_screen_approval_resolve(bool approved);
+void ui_approval_handle_key(bool approved);  /* A=approve, B=deny from physical buttons */
 void ui_screen_status_refresh(void);
 void ui_statusbar_update(void);

@@ -6,6 +6,7 @@
 #include "lvgl.h"
 #include "esp_lvgl_port.h"
 #include "ui/ui_manager.h"
+#include "ui/persona.h"
 #include "buddy_hal/hal.h"
 #include "buddy_hal/agent_events.h"
 #include "agent_core.h"
@@ -42,19 +43,14 @@ lv_obj_t *screen_ble_debug_create(void);
 void      ui_screen_ble_debug_on_show(void);
 void      ui_screen_ble_debug_on_hide(void);
 
-#define MAIN_ENTRY_LINES  8
-#define MAIN_STATUS_H    28
-#define MAIN_MSG_H       22
-#define MAIN_ENTRY_H     23
-#define MAIN_TRANSCRIPT_Y (MAIN_STATUS_H + MAIN_MSG_H + 2)  /* 52 */
+#define MAIN_STATUS_H  28
 
-/* Main screen state label, token label, and BLE indicator (updated externally) */
-static lv_obj_t *s_main_state_label  = NULL;
-static lv_obj_t *s_main_token_label  = NULL;
-static lv_obj_t *s_ble_indicator     = NULL;
-static lv_obj_t *s_main_msg_label    = NULL;
+/* Main screen labels and BLE indicator */
+static lv_obj_t *s_main_title_label   = NULL;
+static lv_obj_t *s_persona_label      = NULL;  /* ASCII art animation */
+static lv_obj_t *s_main_content_label = NULL;
+static lv_obj_t *s_ble_indicator      = NULL;
 static lv_obj_t *s_passkey_label     = NULL;
-static lv_obj_t *s_entry_labels[MAIN_ENTRY_LINES] = {0};
 static lv_obj_t *s_approval_tool     = NULL;
 static lv_obj_t *s_approval_hint     = NULL;
 static char       s_approval_id_store[64];
@@ -73,10 +69,13 @@ static lv_obj_t *s_status_transport  = NULL;
 static lv_timer_t *s_approval_timer  = NULL;
 static lv_timer_t *s_screenoff_timer = NULL;
 
-static const char *s_state_labels[] = {
-    "Sleeping...", "Idle", "Working...", "Needs Approval!",
-    "Celebrating!", "Dizzy...", "Happy!"
-};
+/* Persona animation frame callback — called from LVGL timer context */
+static void persona_frame_cb(const char *frame, void *ctx)
+{
+    (void)ctx;
+    if (s_persona_label)
+        lv_label_set_text(s_persona_label, frame);
+}
 
 static void screenoff_timer_cb(lv_timer_t *t)
 {
@@ -146,6 +145,19 @@ static void deny_btn_cb(lv_event_t *e)
     stop_approval_timers();
 }
 
+/* Physical button handler — called from main.c when A or B key is pressed */
+void ui_approval_handle_key(bool approved)
+{
+    agent_event_t evt = {
+        .type = AGENT_EVT_APPROVAL_RESOLVED,
+        .data.approval_resp.approved = approved,
+    };
+    strlcpy(evt.data.approval_resp.id, s_approval_id_store,
+            sizeof(evt.data.approval_resp.id));
+    agent_core_post_event(&evt);
+    stop_approval_timers();
+}
+
 static lv_obj_t *screen_boot_create(void)
 {
     lv_obj_t *scr = lv_obj_create(NULL);
@@ -157,18 +169,13 @@ static lv_obj_t *screen_boot_create(void)
     return scr;
 }
 
-static void main_settings_btn_cb(lv_event_t *e)
-{
-    ui_manager_push(UI_SCREEN_SETTINGS, UI_ANIM_SLIDE_LEFT);
-}
-
 static lv_obj_t *screen_main_create(void)
 {
     lv_obj_t *scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* ── Status bar ───────────────────────────────────────────────── */
+    /* ── Title bar ────────────────────────────────────────────────── */
     lv_obj_t *bar = lv_obj_create(scr);
     lv_obj_set_size(bar, 320, MAIN_STATUS_H);
     lv_obj_align(bar, LV_ALIGN_TOP_LEFT, 0, 0);
@@ -177,92 +184,46 @@ static lv_obj_t *screen_main_create(void)
     lv_obj_set_style_radius(bar, 0, 0);
     lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Settings button */
-    lv_obj_t *btn_cfg = lv_btn_create(scr);
-    lv_obj_set_size(btn_cfg, 36, MAIN_STATUS_H);
-    lv_obj_align(btn_cfg, LV_ALIGN_TOP_LEFT, 0, 0);
-    lv_obj_set_style_bg_color(btn_cfg, lv_color_make(0x38, 0x38, 0x38), 0);
-    lv_obj_set_style_bg_color(btn_cfg, lv_color_make(0x60, 0x60, 0x60), LV_STATE_PRESSED);
-    lv_obj_set_style_radius(btn_cfg, 0, 0);
-    lv_obj_set_style_shadow_width(btn_cfg, 0, 0);
-    lv_obj_set_style_pad_all(btn_cfg, 0, 0);
-    lv_obj_add_event_cb(btn_cfg, main_settings_btn_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *icon = lv_label_create(btn_cfg);
-    lv_label_set_text(icon, LV_SYMBOL_SETTINGS);
-    lv_obj_set_style_text_color(icon, lv_color_make(0xBB, 0xBB, 0xBB), 0);
-    lv_obj_set_style_text_font(icon, &lv_font_montserrat_14, 0);
-    lv_obj_center(icon);
+    /* Title text: "SmartBuddy" */
+    s_main_title_label = lv_label_create(scr);
+    lv_label_set_text(s_main_title_label, "SmartBuddy");
+    lv_obj_set_style_text_color(s_main_title_label, lv_color_make(0xCC, 0xCC, 0xCC), 0);
+    lv_obj_set_style_text_font(s_main_title_label, &lv_font_montserrat_14, 0);
+    lv_obj_align(s_main_title_label, LV_ALIGN_TOP_LEFT, 8, 7);
 
-    /* BLE indicator */
+    /* BLE indicator — right side of title bar */
     s_ble_indicator = lv_label_create(scr);
     lv_label_set_text(s_ble_indicator, LV_SYMBOL_BLUETOOTH);
     lv_obj_set_style_text_color(s_ble_indicator, lv_color_make(0x55, 0x55, 0x55), 0);
     lv_obj_set_style_text_font(s_ble_indicator, &lv_font_montserrat_14, 0);
-    lv_obj_align(s_ble_indicator, LV_ALIGN_TOP_LEFT, 42, 7);
+    lv_obj_align(s_ble_indicator, LV_ALIGN_TOP_RIGHT, -6, 7);
 
-    /* State label — in status bar, after BLE icon */
-    s_main_state_label = lv_label_create(scr);
-    lv_label_set_text(s_main_state_label, s_state_labels[SM_STATE_SLEEP]);
-    lv_obj_set_style_text_color(s_main_state_label, lv_color_make(0x88, 0x88, 0x88), 0);
-    lv_obj_set_style_text_font(s_main_state_label, &lv_font_montserrat_14, 0);
-    lv_obj_set_size(s_main_state_label, 140, MAIN_STATUS_H);
-    lv_label_set_long_mode(s_main_state_label, LV_LABEL_LONG_CLIP);
-    lv_obj_align(s_main_state_label, LV_ALIGN_TOP_LEFT, 62, 7);
+    /* ── Separator ────────────────────────────────────────────────── */
+    lv_obj_t *sep = lv_obj_create(scr);
+    lv_obj_set_size(sep, 320, 1);
+    lv_obj_align(sep, LV_ALIGN_TOP_LEFT, 0, MAIN_STATUS_H);
+    lv_obj_set_style_bg_color(sep, lv_color_make(0x33, 0x33, 0x33), 0);
+    lv_obj_set_style_border_width(sep, 0, 0);
+    lv_obj_set_style_radius(sep, 0, 0);
 
-    /* Token counter — right side of status bar */
-    s_main_token_label = lv_label_create(scr);
-    lv_label_set_text(s_main_token_label, "0 tok");
-    lv_obj_set_style_text_color(s_main_token_label, lv_color_make(0x99, 0x99, 0x99), 0);
-    lv_obj_set_style_text_font(s_main_token_label, &lv_font_montserrat_14, 0);
-    lv_obj_align(s_main_token_label, LV_ALIGN_TOP_RIGHT, -6, 7);
+    /* ── Persona ASCII art label — centered, monospace font ─────── */
+    s_persona_label = lv_label_create(scr);
+    lv_label_set_text(s_persona_label, "");
+    lv_obj_set_style_text_color(s_persona_label, lv_color_make(0xCC, 0xCC, 0xCC), 0);
+    lv_obj_set_style_text_font(s_persona_label, &lv_font_unscii_8, 0);
+    lv_obj_set_size(s_persona_label, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_align(s_persona_label, LV_ALIGN_CENTER, 0, -20);
+    lv_obj_set_style_text_align(s_persona_label, LV_TEXT_ALIGN_LEFT, 0);
 
-    /* ── Thin separator after status bar ──────────────────────────── */
-    lv_obj_t *sep1 = lv_obj_create(scr);
-    lv_obj_set_size(sep1, 320, 1);
-    lv_obj_align(sep1, LV_ALIGN_TOP_LEFT, 0, MAIN_STATUS_H);
-    lv_obj_set_style_bg_color(sep1, lv_color_make(0x33, 0x33, 0x33), 0);
-    lv_obj_set_style_border_width(sep1, 0, 0);
-    lv_obj_set_style_radius(sep1, 0, 0);
-
-    /* ── Msg bar (current status from Claude) ─────────────────────── */
-    lv_obj_t *msg_bar = lv_obj_create(scr);
-    lv_obj_set_size(msg_bar, 320, MAIN_MSG_H);
-    lv_obj_align(msg_bar, LV_ALIGN_TOP_LEFT, 0, MAIN_STATUS_H + 1);
-    lv_obj_set_style_bg_color(msg_bar, lv_color_make(0x0D, 0x0D, 0x0D), 0);
-    lv_obj_set_style_border_width(msg_bar, 0, 0);
-    lv_obj_set_style_radius(msg_bar, 0, 0);
-    lv_obj_clear_flag(msg_bar, LV_OBJ_FLAG_SCROLLABLE);
-
-    s_main_msg_label = lv_label_create(scr);
-    lv_label_set_text(s_main_msg_label, "");
-    lv_obj_set_style_text_color(s_main_msg_label, lv_color_make(0x55, 0x55, 0x55), 0);
-    lv_obj_set_style_text_font(s_main_msg_label, &lv_font_montserrat_14, 0);
-    lv_obj_set_size(s_main_msg_label, 314, MAIN_MSG_H);
-    lv_label_set_long_mode(s_main_msg_label, LV_LABEL_LONG_CLIP);
-    lv_obj_align(s_main_msg_label, LV_ALIGN_TOP_LEFT, 4, MAIN_STATUS_H + 3);
-
-    /* ── Thin separator after msg bar ────────────────────────────── */
-    lv_obj_t *sep2 = lv_obj_create(scr);
-    lv_obj_set_size(sep2, 320, 1);
-    lv_obj_align(sep2, LV_ALIGN_TOP_LEFT, 0, MAIN_STATUS_H + MAIN_MSG_H + 1);
-    lv_obj_set_style_bg_color(sep2, lv_color_make(0x22, 0x22, 0x22), 0);
-    lv_obj_set_style_border_width(sep2, 0, 0);
-    lv_obj_set_style_radius(sep2, 0, 0);
-
-    /* ── Transcript entry lines (newest at top) ───────────────────── */
-    /* Brightness fades from white (newest) to dim (oldest) */
-    static const uint8_t entry_bright[] = {0xFF, 0xCC, 0xAA, 0x88, 0x66, 0x55, 0x44, 0x44};
-    for (int i = 0; i < MAIN_ENTRY_LINES; i++) {
-        s_entry_labels[i] = lv_label_create(scr);
-        lv_label_set_text(s_entry_labels[i], "");
-        uint8_t b = entry_bright[i];
-        lv_obj_set_style_text_color(s_entry_labels[i], lv_color_make(b, b, b), 0);
-        lv_obj_set_style_text_font(s_entry_labels[i], &lv_font_montserrat_14, 0);
-        lv_obj_set_size(s_entry_labels[i], 314, MAIN_ENTRY_H);
-        lv_label_set_long_mode(s_entry_labels[i], LV_LABEL_LONG_CLIP);
-        lv_obj_align(s_entry_labels[i], LV_ALIGN_TOP_LEFT,
-                     4, MAIN_TRANSCRIPT_Y + i * MAIN_ENTRY_H);
-    }
+    /* ── Content / msg label — centered below state ──────────────── */
+    s_main_content_label = lv_label_create(scr);
+    lv_label_set_text(s_main_content_label, "Connect via Hardware Buddy");
+    lv_obj_set_style_text_color(s_main_content_label, lv_color_make(0x66, 0x66, 0x66), 0);
+    lv_obj_set_style_text_font(s_main_content_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_width(s_main_content_label, 300);
+    lv_label_set_long_mode(s_main_content_label, LV_LABEL_LONG_WRAP);
+    lv_obj_align(s_main_content_label, LV_ALIGN_CENTER, 0, 20);
+    lv_obj_set_style_text_align(s_main_content_label, LV_TEXT_ALIGN_CENTER, 0);
 
     /* ── Passkey overlay (hidden by default, shown during BLE pairing) ─ */
     s_passkey_label = lv_label_create(scr);
@@ -494,15 +455,28 @@ static void notify_screen_lifecycle(ui_screen_id_t leaving, ui_screen_id_t enter
 
 esp_err_t ui_manager_init(void)
 {
-    /* Create all screens upfront */
+    /* All LVGL object/timer creation must happen inside the port lock because
+     * the LVGL task is already running by the time we get here. */
+    if (!lvgl_port_lock(0)) return ESP_FAIL;
+
     for (int i = 0; i < UI_SCREEN_MAX; i++) {
         s_screens[i] = create_screen((ui_screen_id_t)i);
     }
+    /* One-shot screen-off timer; reset on each activity */
+    s_screenoff_timer = lv_timer_create(screenoff_timer_cb,
+                                         (uint32_t)CONFIG_UI_SCREEN_OFF_TIMEOUT_S * 1000,
+                                         NULL);
+    lv_timer_set_repeat_count(s_screenoff_timer, 1);
+
+    persona_driver_init(persona_frame_cb, NULL);
+
+    lvgl_port_unlock();
     return ESP_OK;
 }
 
 void ui_manager_deinit(void)
 {
+    persona_driver_deinit();
     for (int i = 0; i < UI_SCREEN_MAX; i++) {
         if (s_screens[i]) lv_obj_del(s_screens[i]);
     }
@@ -571,44 +545,107 @@ ui_screen_id_t ui_manager_current(void)
 
 void ui_manager_on_state_change(sm_state_t new_state, sm_state_t old_state, void *ctx)
 {
+    extern hal_handles_t g_hal;
+
     switch (new_state) {
-    case SM_STATE_ATTENTION:
-        ui_manager_push(UI_SCREEN_APPROVAL, UI_ANIM_SLIDE_LEFT);
-        if (s_screenoff_timer) lv_timer_pause(s_screenoff_timer);
-        break;
     case SM_STATE_SLEEP:
         ui_manager_show(UI_SCREEN_MAIN, UI_ANIM_NONE);
+        /* No transport connected — screen off immediately, timer not needed */
+        if (lvgl_port_lock(100)) {
+            if (s_screenoff_timer) lv_timer_pause(s_screenoff_timer);
+            lvgl_port_unlock();
+        }
+        if (g_hal.display) g_hal.display->backlight_set(g_hal.display, 0);
+        if (g_hal.led)     g_hal.led->off(g_hal.led);
         break;
+
+    case SM_STATE_ATTENTION:
+        ui_manager_push(UI_SCREEN_APPROVAL, UI_ANIM_SLIDE_LEFT);
+        /* Keep screen on, pause inactivity timer during approval */
+        if (lvgl_port_lock(100)) {
+            if (s_screenoff_timer) lv_timer_pause(s_screenoff_timer);
+            lvgl_port_unlock();
+        }
+        if (g_hal.display) g_hal.display->backlight_set(g_hal.display, 100);
+        /* Red alert blink */
+        if (g_hal.led) {
+            g_hal.led->set_rgb(g_hal.led, 255, 0, 0);
+            g_hal.led->blink(g_hal.led, 200, 200, -1);
+        }
+        break;
+
     default:
         if (old_state == SM_STATE_ATTENTION) {
             ui_manager_pop(UI_ANIM_SLIDE_RIGHT);
-            if (s_screenoff_timer) lv_timer_resume(s_screenoff_timer);
         }
-        ui_screen_main_set_state(new_state);
+        /* Screen on; pause inactivity timer — screen stays on while connected */
+        if (g_hal.display) g_hal.display->backlight_set(g_hal.display, 100);
+        if (lvgl_port_lock(100)) {
+            if (s_screenoff_timer) lv_timer_pause(s_screenoff_timer);
+            lvgl_port_unlock();
+        }
+        /* LED color per state */
+        if (g_hal.led) {
+            switch (new_state) {
+            case SM_STATE_IDLE:
+                g_hal.led->set_rgb(g_hal.led, 0, 150, 50);
+                g_hal.led->blink(g_hal.led, 1200, 1200, -1);
+                break;
+            case SM_STATE_BUSY:
+                g_hal.led->set_rgb(g_hal.led, 0, 100, 220);
+                g_hal.led->blink(g_hal.led, 400, 400, -1);
+                break;
+            case SM_STATE_CELEBRATE:
+                g_hal.led->set_rgb(g_hal.led, 255, 200, 0);
+                g_hal.led->blink(g_hal.led, 150, 150, -1);
+                break;
+            case SM_STATE_DIZZY:
+                g_hal.led->set_rgb(g_hal.led, 255, 100, 0);
+                g_hal.led->blink(g_hal.led, 100, 100, -1);
+                break;
+            case SM_STATE_HEART:
+                g_hal.led->set_rgb(g_hal.led, 255, 50, 100);
+                g_hal.led->blink(g_hal.led, 700, 700, -1);
+                break;
+            default:
+                g_hal.led->off(g_hal.led);
+                break;
+            }
+        }
         break;
     }
+
+    ui_screen_main_set_state(new_state);
 }
 
 void ui_screen_main_set_state(sm_state_t state)
 {
     if (state >= SM_STATE_MAX) return;
+    /* persona_driver_set_state() calls lv_label_set_text(), so hold the lock
+     * for both the color update and the first frame push. */
     if (lvgl_port_lock(100)) {
-        if (s_main_state_label)
-            lv_label_set_text(s_main_state_label, s_state_labels[state]);
+        if (s_persona_label) {
+            lv_color_t c;
+            switch (state) {
+            case SM_STATE_IDLE:      c = lv_color_make(0x00, 0xCC, 0x44); break;
+            case SM_STATE_BUSY:      c = lv_color_make(0x44, 0xBB, 0xFF); break;
+            case SM_STATE_ATTENTION: c = lv_color_make(0xFF, 0x88, 0x00); break;
+            case SM_STATE_CELEBRATE: c = lv_color_make(0xFF, 0xFF, 0x44); break;
+            case SM_STATE_DIZZY:     c = lv_color_make(0xFF, 0x66, 0x88); break;
+            case SM_STATE_HEART:     c = lv_color_make(0xFF, 0x44, 0x66); break;
+            default:                 c = lv_color_make(0x55, 0x55, 0x55); break;
+            }
+            lv_obj_set_style_text_color(s_persona_label, c, 0);
+        }
+        persona_driver_set_state(state);
         lvgl_port_unlock();
     }
 }
 
 void ui_screen_main_set_token_count(uint32_t tokens)
 {
-    if (lvgl_port_lock(100)) {
-        if (s_main_token_label) {
-            char buf[32];
-            snprintf(buf, sizeof(buf), "%lu tok", (unsigned long)tokens);
-            lv_label_set_text(s_main_token_label, buf);
-        }
-        lvgl_port_unlock();
-    }
+    /* No dedicated token display in minimal layout; this keeps agent_core happy. */
+    (void)tokens;
 }
 
 void ui_screen_main_set_ble_connected(bool connected)
@@ -645,29 +682,22 @@ void ui_screen_main_set_msg(const char *msg)
 {
     if (!msg) msg = "";
     if (!lvgl_port_lock(100)) return;
-    if (s_main_msg_label) {
-        lv_label_set_text(s_main_msg_label, msg);
-        /* Amber when there's content, dim grey when empty/ready */
+    if (s_main_content_label) {
+        lv_label_set_text(s_main_content_label, msg);
+        /* Amber when there's Claude content, dim grey when empty/ready */
         bool active = msg[0] && strcmp(msg, "ready") != 0;
         lv_color_t c = active
             ? lv_color_make(0xCC, 0x88, 0x00)
-            : lv_color_make(0x44, 0x44, 0x44);
-        lv_obj_set_style_text_color(s_main_msg_label, c, 0);
+            : lv_color_make(0x55, 0x55, 0x55);
+        lv_obj_set_style_text_color(s_main_content_label, c, 0);
     }
     lvgl_port_unlock();
 }
 
 void ui_screen_main_set_entries(const char (*entries)[92], uint8_t n)
 {
-    if (!lvgl_port_lock(100)) return;
-    for (int i = 0; i < MAIN_ENTRY_LINES; i++) {
-        if (!s_entry_labels[i]) continue;
-        if (i < n && entries[i][0])
-            lv_label_set_text(s_entry_labels[i], entries[i]);
-        else
-            lv_label_set_text(s_entry_labels[i], "");
-    }
-    lvgl_port_unlock();
+    /* No dedicated entry display in minimal layout. */
+    (void)entries; (void)n;
 }
 
 void ui_screen_approval_set_prompt(const char *tool, const char *hint, const char *id)

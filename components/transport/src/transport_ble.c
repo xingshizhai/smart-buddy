@@ -39,12 +39,12 @@
     0x93,0xF3, 0xA3,0xB5, 0x03,0x00,0x40,0x6E
 
 /*
- * Characteristic security flags.
- * NUS characteristics support plaintext writes so the desktop can send
- * heartbeats without pairing. LE Secure Connections with passkey pairing
- * is configured in ble_on_sync() for users who want an encrypted link;
- * characteristics stay open to avoid blocking data flow when pairing
- * doesn't complete (e.g. first connection, no desktop UI focus).
+ * Standard NUS characteristic flags — no encryption required on the service.
+ * macOS (Claude Desktop) does not perform passkey entry, so requiring
+ * BLE_GATT_CHR_F_WRITE_ENC / BLE_GATT_CHR_F_NOTIFY_INDICATE_ENC would cause
+ * every CCCD write to fail with Insufficient Auth → pairing → MITM failure
+ * → disconnect.  Leave the service open and let the SM layer handle optional
+ * Just-Works bonding independently.
  */
 #define NUS_RX_CHR_FLAGS (BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP)
 #define NUS_TX_CHR_FLAGS (BLE_GATT_CHR_F_NOTIFY)
@@ -56,6 +56,7 @@ typedef struct {
     uint16_t            conn_handle;
     uint16_t            tx_attr_handle;
     transport_state_t   state;
+    bool                cccd_subscribed;  /* central has enabled TX notifications */
     char                rx_buf[TRANSPORT_MAX_FRAME_SIZE];
     size_t              rx_pos;
 } ble_ctx_t;
@@ -74,6 +75,7 @@ static void ble_start_advertising(void);
 static int nus_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                               struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
+    ESP_LOGI(TAG, "chr access op=%d attr=%d", ctxt->op, attr_handle);
     if (!s_ctx) return BLE_ATT_ERR_UNLIKELY;
 
     if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
@@ -125,21 +127,15 @@ static const struct ble_gatt_svc_def s_gatt_svcs[] = {
 
 static void ble_on_sync(void)
 {
+    esp_log_level_set("NimBLE", ESP_LOG_DEBUG);
     ble_hs_util_ensure_addr(0);
     ble_att_set_preferred_mtu(512);
 
-    /*
-     * Claude Desktop requires LE Secure Connections with passkey pairing.
-     * IO capability DISPLAY_ONLY: device shows 6-digit passkey on screen,
-     * user types it into the desktop app (KeyboardOnly on central side).
-     * MITM + SC + bonding provides encrypted link with replay protection.
-     */
-    ble_hs_cfg.sm_io_cap         = BLE_SM_IO_CAP_DISP_ONLY;
-    ble_hs_cfg.sm_bonding        = 1;
-    ble_hs_cfg.sm_mitm           = 1;
-    ble_hs_cfg.sm_sc             = 1;
-    ble_hs_cfg.sm_our_key_dist   = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
-    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    /* Open NUS — no bonding, no pairing required. */
+    ble_hs_cfg.sm_io_cap  = BLE_SM_IO_CAP_NO_IO;
+    ble_hs_cfg.sm_bonding = 0;
+    ble_hs_cfg.sm_mitm    = 0;
+    ble_hs_cfg.sm_sc      = 0;
 
     ble_start_advertising();
 }
@@ -168,19 +164,11 @@ static void ble_start_advertising(void)
     };
     ble_gap_adv_set_fields(&adv_fields);
 
-    /*
-     * Slave Connection Interval Range (AD type 0x12).
-     * 4 bytes: min (uint16 LE), max (uint16 LE), units of 1.25 ms.
-     * 6 = 7.5 ms, 18 = 22.5 ms. macOS uses these for optimal params.
-     */
-    static const uint8_t slave_itvl_data[4] = {0x06, 0x00, 0x12, 0x00};
-
     const char *name = s_ctx ? s_ctx->device_name : CONFIG_TRANSPORT_BLE_DEVICE_NAME;
     struct ble_hs_adv_fields rsp_fields = {
-        .name               = (const uint8_t *)name,
-        .name_len           = strlen(name),
-        .name_is_complete   = 1,
-        .slave_itvl_range   = slave_itvl_data,
+        .name             = (const uint8_t *)name,
+        .name_len         = strlen(name),
+        .name_is_complete = 1,
     };
     ble_gap_adv_rsp_set_fields(&rsp_fields);
 
@@ -198,26 +186,32 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
         ESP_LOGI(TAG, "subscribe attr=%d notify=%d",
                  event->subscribe.attr_handle, event->subscribe.cur_notify);
         if (event->subscribe.attr_handle == s_tx_attr_handle &&
-            event->subscribe.cur_notify && s_ctx->base.state_cb &&
             s_ctx->state == TRANSPORT_STATE_CONNECTED) {
-            /* Re-fire connected so agent_core sends device name after subscription.
-             * Guard on state == CONNECTED: prevents a stale SUBSCRIBE event that
-             * arrives after BLE_GAP_EVENT_DISCONNECT from spuriously turning the
-             * UI indicator green when nothing is actually connected. */
-            s_ctx->base.state_cb(TRANSPORT_ID_BLE, TRANSPORT_STATE_CONNECTED,
-                                 s_ctx->base.cb_ctx);
+            if (event->subscribe.cur_notify) {
+                s_ctx->cccd_subscribed = true;
+                /* Re-fire connected so agent_core sends time_sync now that
+                 * notifications are permitted. Guard on state == CONNECTED
+                 * prevents a stale SUBSCRIBE after disconnect. */
+                if (s_ctx->base.state_cb)
+                    s_ctx->base.state_cb(TRANSPORT_ID_BLE, TRANSPORT_STATE_CONNECTED,
+                                         s_ctx->base.cb_ctx);
+            } else {
+                s_ctx->cccd_subscribed = false;
+            }
         }
         break;
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status == 0) {
             s_ctx->conn_handle = event->connect.conn_handle;
             s_ctx->state = TRANSPORT_STATE_CONNECTED;
+            s_ctx->cccd_subscribed = false;
             ESP_LOGI(TAG, "connected handle=%d", s_ctx->conn_handle);
+            /* Notify at physical connect so the UI wakes (screen on, BLE indicator
+             * green).  Data sending is guarded by cccd_subscribed in ble_tp_send,
+             * so no notifications reach macOS before the central subscribes. */
             if (s_ctx->base.state_cb)
                 s_ctx->base.state_cb(TRANSPORT_ID_BLE, TRANSPORT_STATE_CONNECTED,
                                      s_ctx->base.cb_ctx);
-            /* MTU exchange is initiated by the central; our preferred size
-             * is already set by ble_att_set_preferred_mtu() in ble_on_sync. */
         } else {
             ble_start_advertising();
         }
@@ -226,6 +220,7 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
         ESP_LOGI(TAG, "disconnected reason=%d", event->disconnect.reason);
         s_ctx->conn_handle = BLE_HS_CONN_HANDLE_NONE;
         s_ctx->state = TRANSPORT_STATE_DISCONNECTED;
+        s_ctx->cccd_subscribed = false;
         s_secure  = false;
         s_passkey = 0;
         if (s_ctx->base.state_cb)
@@ -246,7 +241,7 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
          * desktop (KeyboardOnly on the central side).
          */
         if (event->passkey.params.action == BLE_SM_IOACT_DISP) {
-            s_passkey = 100000 + esp_random() % 900000;
+            s_passkey = esp_random() % 1000000;
             struct ble_sm_io io = {
                 .action = BLE_SM_IOACT_DISP,
                 .passkey = s_passkey,
@@ -269,12 +264,11 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
         s_secure = (event->enc_change.status == 0);
         ESP_LOGI(TAG, "encryption %s (status=%d)",
                  s_secure ? "OK" : "FAIL", event->enc_change.status);
-        if (!s_secure) {
-            s_passkey = 0;
-        }
+        s_passkey = 0;
         break;
 
     default:
+        ESP_LOGD(TAG, "gap event %d", event->type);
         break;
     }
     return 0;
@@ -295,6 +289,7 @@ static esp_err_t ble_tp_init(transport_t *t, const void *cfg)
     ble_ctx_t *ctx = (ble_ctx_t *)t;
     ctx->conn_handle = BLE_HS_CONN_HANDLE_NONE;
     ctx->state = TRANSPORT_STATE_DISCONNECTED;
+    ctx->cccd_subscribed = false;
     return ESP_OK;
 }
 
@@ -332,6 +327,7 @@ static esp_err_t ble_tp_send(transport_t *t, const uint8_t *data, size_t len)
 {
     ble_ctx_t *ctx = (ble_ctx_t *)t;
     if (ctx->state != TRANSPORT_STATE_CONNECTED) return ESP_ERR_INVALID_STATE;
+    if (!ctx->cccd_subscribed) return ESP_ERR_INVALID_STATE;
 
     size_t mtu = ctx->mtu > 20 ? ctx->mtu - 3 : 20;
     size_t offset = 0;

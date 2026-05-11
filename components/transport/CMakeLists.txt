@@ -13,4 +13,5 @@ idf_component_register(
         esp_driver_usb_serial_jtag
     PRIV_REQUIRES
         espressif__esp_websocket_client
+        nvs_flash
 )

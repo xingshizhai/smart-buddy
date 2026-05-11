@@ -8,6 +8,7 @@
 #include "esp_system.h"
 #include "cJSON.h"
 #include "protocol/protocol.h"
+#include "transport/transport.h"
 
 #define TAG "CLAUDE_BUDDY"
 
@@ -74,18 +75,6 @@ static esp_err_t claude_buddy_decode(proto_t *proto,
     cJSON *tokens_j       = cJSON_GetObjectItem(root, "tokens");
     cJSON *tokens_today_j = cJSON_GetObjectItem(root, "tokens_today");
     cJSON *total_j        = cJSON_GetObjectItem(root, "total");
-    cJSON *completed_j    = cJSON_GetObjectItem(root, "completed");
-
-    /* "completed": true — Claude Desktop signals a turn just finished.
-     * Fire TURN_COMPLETE before the session update so the SM sees BUSY
-     * for 1.5 s regardless of whether running > 0. */
-    if (cJSON_IsTrue(completed_j) && idx < max_events) {
-        agent_event_t *ce = &out_events[idx++];
-        memset(ce, 0, sizeof(*ce));
-        ce->type = AGENT_EVT_TURN_COMPLETE;
-        ce->timestamp_us = esp_timer_get_time();
-        ESP_LOGI(TAG, "turn complete (completed=true)");
-    }
 
     /* Heartbeat: has any of running / waiting / tokens / total */
     if ((running_j || waiting_j || tokens_j || tokens_today_j || total_j)
@@ -117,6 +106,16 @@ static esp_err_t claude_buddy_decode(proto_t *proto,
             }
             e->data.session.n_entries = (uint8_t)n;
         }
+
+        /* Debug: dump all heartbeat fields */
+        ESP_LOGI(TAG, "HB r=%lu w=%lu tok=%lu tok_today=%lu total=%lu msg='%s' n_entries=%d",
+                 (unsigned long)e->data.session.running,
+                 (unsigned long)e->data.session.waiting,
+                 (unsigned long)e->data.session.tokens_total,
+                 (unsigned long)e->data.session.tokens_today,
+                 (unsigned long)(total_j ? (uint32_t)total_j->valuedouble : 0),
+                 e->data.session.msg,
+                 e->data.session.n_entries);
 
         /* Token milestone */
         uint32_t tok = e->data.session.tokens_total;
@@ -163,6 +162,7 @@ static esp_err_t claude_buddy_decode(proto_t *proto,
         /* Prompt disappeared → clear dedup cache */
         if (!id_j && ctx->last_prompt_id[0]) {
             ctx->last_prompt_id[0] = '\0';
+            ESP_LOGD(TAG, "prompt cleared, cleared dedup cache");
         }
     }
 
@@ -234,14 +234,26 @@ static esp_err_t claude_buddy_encode(proto_t *proto,
     case PROTO_MSG_CMD_ACK: {
         cJSON_AddStringToObject(root, "ack", msg->cmd_ack.cmd);
         cJSON_AddBoolToObject(root, "ok", msg->cmd_ack.ok);
-        /* For "status", add minimal data block so the Hardware Buddy window shows stats */
+        /* For "status", add data block per protocol spec */
         if (strcmp(msg->cmd_ack.cmd, "status") == 0) {
             cJSON *data = cJSON_CreateObject();
-            cJSON_AddFalseToObject(data, "sec");
+            /* Device name — required by desktop for device identification */
+            cJSON_AddStringToObject(data, "name",
+                                     transport_ble_get_device_name());
+            /* Link security status */
+            cJSON_AddBoolToObject(data, "sec", transport_ble_is_secure());
+            /* System info */
             cJSON *sys = cJSON_CreateObject();
             cJSON_AddNumberToObject(sys, "heap", (double)esp_get_free_heap_size());
             cJSON_AddItemToObject(data, "sys", sys);
+            /* Stats — use agent_stats if available */
+            cJSON *stats = cJSON_CreateObject();
+            cJSON_AddItemToObject(data, "stats", stats);
             cJSON_AddItemToObject(root, "data", data);
+            ESP_LOGI(TAG, "status ack: name=%s sec=%d heap=%lu",
+                     transport_ble_get_device_name(),
+                     transport_ble_is_secure() ? 1 : 0,
+                     (unsigned long)esp_get_free_heap_size());
         }
         break;
     }

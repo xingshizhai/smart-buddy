@@ -1,5 +1,5 @@
 #include "sdkconfig.h"
-#if CONFIG_TRANSPORT_BLE_ENABLED
+#if CONFIG_BT_NIMBLE_ENABLED
 
 #include <string.h>
 #include <stdbool.h>
@@ -7,88 +7,238 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "esp_log.h"
-#include "esp_random.h"
-#include "esp_timer.h"
 #include "esp_mac.h"
+#include "esp_random.h"
+#include "nvs_flash.h"
+#include "nimble/ble.h"
+#include "host/ble_hs.h"
+#include "host/ble_uuid.h"
+#include "host/ble_gap.h"
+#include "host/ble_gatt.h"
+#include "host/ble_store.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
-#include "host/ble_hs.h"
-#include "host/ble_gap.h"
+#include "host/ble_hs_pvcy.h"
 #include "host/ble_sm.h"
-#include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
+#include "host/util/util.h"
 #include "transport/transport.h"
 
+/* ble_store_config_init is not exported in the public header */
+void ble_store_config_init(void);
+
 #define TAG "BLE"
-
-/*
- * Nordic UART Service (NUS) UUIDs in little-endian byte order.
- * Base UUID: 6E40xxxx-B5A3-F393-E0A9-E50E24DCCA9E
- */
-#define NUS_SVC_UUID_BYTES  \
-    0x9E,0xCA,0xDC,0x24, 0x0E,0xE5, 0xA9,0xE0, \
-    0x93,0xF3, 0xA3,0xB5, 0x01,0x00,0x40,0x6E
-
-#define NUS_RX_UUID_BYTES   \
-    0x9E,0xCA,0xDC,0x24, 0x0E,0xE5, 0xA9,0xE0, \
-    0x93,0xF3, 0xA3,0xB5, 0x02,0x00,0x40,0x6E
-
-#define NUS_TX_UUID_BYTES   \
-    0x9E,0xCA,0xDC,0x24, 0x0E,0xE5, 0xA9,0xE0, \
-    0x93,0xF3, 0xA3,0xB5, 0x03,0x00,0x40,0x6E
-
-/*
- * Standard NUS characteristic flags — no encryption required on the service.
- * macOS (Claude Desktop) does not perform passkey entry, so requiring
- * BLE_GATT_CHR_F_WRITE_ENC / BLE_GATT_CHR_F_NOTIFY_INDICATE_ENC would cause
- * every CCCD write to fail with Insufficient Auth → pairing → MITM failure
- * → disconnect.  Leave the service open and let the SM layer handle optional
- * Just-Works bonding independently.
- */
-#define NUS_RX_CHR_FLAGS (BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP)
-#define NUS_TX_CHR_FLAGS (BLE_GATT_CHR_F_NOTIFY)
 
 typedef struct {
     transport_t         base;
     char                device_name[32];
     uint16_t            mtu;
     uint16_t            conn_handle;
-    uint16_t            tx_attr_handle;
+    uint16_t            tx_val_handle;
+    uint16_t            rx_val_handle;
     transport_state_t   state;
-    bool                cccd_subscribed;  /* central has enabled TX notifications */
+    bool                cccd_subscribed;
+    bool                secure;
     char                rx_buf[TRANSPORT_MAX_FRAME_SIZE];
     size_t              rx_pos;
 } ble_ctx_t;
 
 static ble_ctx_t *s_ctx = NULL;
-/* Static handle written by NimBLE GATT registration */
-static uint16_t   s_tx_attr_handle = 0;
-
-/* Security / passkey state */
 static uint32_t s_passkey = 0;
-static bool     s_secure  = false;
 
+static void start_advertising(void);
 static int ble_gap_event_cb(struct ble_gap_event *event, void *arg);
-static void ble_start_advertising(void);
 
-static int nus_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
-                              struct ble_gatt_access_ctxt *ctxt, void *arg)
+/* ── NUS UUIDs ────────────────────────────────────────────────────── */
+
+static const ble_uuid128_t nus_svc_uuid = {
+    .u.type = BLE_UUID_TYPE_128,
+    .value = { 0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
+               0x93, 0xf3, 0xa3, 0xb5, 0x01, 0x00, 0x40, 0x6e }
+};
+static const ble_uuid128_t nus_tx_uuid = {
+    .u.type = BLE_UUID_TYPE_128,
+    .value = { 0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
+               0x93, 0xf3, 0xa3, 0xb5, 0x03, 0x00, 0x40, 0x6e }
+};
+static const ble_uuid128_t nus_rx_uuid = {
+    .u.type = BLE_UUID_TYPE_128,
+    .value = { 0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
+               0x93, 0xf3, 0xa3, 0xb5, 0x02, 0x00, 0x40, 0x6e }
+};
+
+/* ── Advertising ────────────────────────────────────────────────────── */
+
+static void start_advertising(void)
 {
-    ESP_LOGI(TAG, "chr access op=%d attr=%d", ctxt->op, attr_handle);
+    struct ble_hs_adv_fields fields;
+    memset(&fields, 0, sizeof(fields));
+    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+
+    /* Advertise the 128-bit NUS service UUID so Claude Desktop can
+     * discover this device by filtering on the service UUID. */
+    fields.uuids128 = (ble_uuid128_t *)&nus_svc_uuid;
+    fields.num_uuids128 = 1;
+    fields.uuids128_is_complete = 1;
+
+    int rc = ble_gap_adv_set_fields(&fields);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "adv set fields: %d", rc);
+        return;
+    }
+
+    /* Put device name in scan response to stay within the 31-byte
+     * advertising packet limit. */
+    const char *name = ble_svc_gap_device_name();
+    if (name && name[0]) {
+        struct ble_hs_adv_fields rsp;
+        memset(&rsp, 0, sizeof(rsp));
+        rsp.name = (const uint8_t *)name;
+        rsp.name_len = strlen(name);
+        rsp.name_is_complete = 1;
+        rc = ble_gap_adv_rsp_set_fields(&rsp);
+        if (rc != 0) {
+            ESP_LOGE(TAG, "adv rsp set fields: %d", rc);
+            return;
+        }
+        ESP_LOGI(TAG, "device name: '%s' (len=%d)", name, rsp.name_len);
+    }
+
+    uint8_t own_addr_type;
+    rc = ble_hs_id_infer_auto(0, &own_addr_type);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_hs_id_infer_auto: %d", rc);
+        return;
+    }
+
+    struct ble_gap_adv_params adv_params = {0};
+    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
+    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+
+    rc = ble_gap_adv_start(own_addr_type, NULL, BLE_HS_FOREVER,
+                           &adv_params, ble_gap_event_cb, NULL);
+    if (rc != 0) { ESP_LOGE(TAG, "adv start: %d", rc); return; }
+    ESP_LOGI(TAG, "advertising as '%s'", name ? name : "unknown");
+}
+
+/* ── GAP event handler ─────────────────────────────────────────────── */
+
+static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
+{
+    if (!s_ctx) return 0;
+
+    switch (event->type) {
+    case BLE_GAP_EVENT_CONNECT:
+        if (event->connect.status == 0) {
+            s_ctx->conn_handle = event->connect.conn_handle;
+            s_ctx->state = TRANSPORT_STATE_CONNECTED;
+            s_ctx->secure = false;
+            s_ctx->cccd_subscribed = false;
+            ESP_LOGI(TAG, "connected conn_handle=%d", s_ctx->conn_handle);
+            /* Generate random passkey for new connections */
+            s_passkey = (esp_random() % 1000000);
+            if (s_ctx->base.state_cb)
+                s_ctx->base.state_cb(TRANSPORT_ID_BLE, TRANSPORT_STATE_CONNECTED,
+                                     s_ctx->base.cb_ctx);
+            /* Initiate encryption (will use existing bond if available) */
+            ble_gap_security_initiate(event->connect.conn_handle);
+        } else {
+            ESP_LOGE(TAG, "connect failed rc=%d", event->connect.status);
+            start_advertising();
+        }
+        return 0;
+
+    case BLE_GAP_EVENT_DISCONNECT:
+        ESP_LOGI(TAG, "disconnected reason=%d", event->disconnect.reason);
+        s_ctx->state = TRANSPORT_STATE_DISCONNECTED;
+        s_ctx->secure = false;
+        s_ctx->cccd_subscribed = false;
+        s_passkey = 0;
+        if (s_ctx->base.state_cb)
+            s_ctx->base.state_cb(TRANSPORT_ID_BLE, TRANSPORT_STATE_DISCONNECTED,
+                                 s_ctx->base.cb_ctx);
+        start_advertising();
+        return 0;
+
+    case BLE_GAP_EVENT_ADV_COMPLETE:
+        ESP_LOGI(TAG, "adv complete, restarting");
+        start_advertising();
+        return 0;
+
+    case BLE_GAP_EVENT_ENC_CHANGE:
+        if (event->enc_change.status == 0) {
+            s_ctx->secure = true;
+            ESP_LOGI(TAG, "encryption OK");
+            if (s_ctx->base.state_cb)
+                s_ctx->base.state_cb(TRANSPORT_ID_BLE, TRANSPORT_STATE_CONNECTED,
+                                     s_ctx->base.cb_ctx);
+        } else {
+            ESP_LOGE(TAG, "encryption FAIL status=%d", event->enc_change.status);
+        }
+        return 0;
+
+    case BLE_GAP_EVENT_REPEAT_PAIRING: {
+        /* Delete old bond for this peer, allow fresh pairing */
+        struct ble_gap_conn_desc desc;
+        int rc = ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc);
+        if (rc == 0) {
+            ble_store_util_delete_peer(&desc.peer_id_addr);
+            ESP_LOGI(TAG, "deleted old bond for repeat pairing");
+        }
+        return BLE_GAP_REPEAT_PAIRING_RETRY;
+    }
+
+    case BLE_GAP_EVENT_PASSKEY_ACTION: {
+        if (event->passkey.params.action == BLE_SM_IOACT_DISP) {
+            struct ble_sm_io pkey = {0};
+            pkey.action = BLE_SM_IOACT_DISP;
+            pkey.passkey = s_passkey;
+            ESP_LOGI(TAG, "=== PASSKEY: %06lu ===", (unsigned long)pkey.passkey);
+            ble_sm_inject_io(event->passkey.conn_handle, &pkey);
+        } else if (event->passkey.params.action == BLE_SM_IOACT_NUMCMP) {
+            struct ble_sm_io pkey = {0};
+            pkey.action = BLE_SM_IOACT_NUMCMP;
+            pkey.numcmp_accept = 1;
+            ble_sm_inject_io(event->passkey.conn_handle, &pkey);
+        } else if (event->passkey.params.action == BLE_SM_IOACT_NONE) {
+            /* Just-works pairing */
+            ESP_LOGI(TAG, "just-works pairing (no MITM)");
+        }
+        return 0;
+    }
+
+    case BLE_GAP_EVENT_MTU:
+        s_ctx->mtu = event->mtu.value;
+        ESP_LOGI(TAG, "MTU=%d", s_ctx->mtu);
+        return 0;
+
+    case BLE_GAP_EVENT_SUBSCRIBE:
+        if (event->subscribe.attr_handle == s_ctx->tx_val_handle + 1) {
+            s_ctx->cccd_subscribed = (event->subscribe.cur_notify != 0);
+            ESP_LOGI(TAG, "TX notify %s", s_ctx->cccd_subscribed ? "on" : "off");
+        }
+        return 0;
+
+    default:
+        return 0;
+    }
+}
+
+/* ── GATT access callback ─────────────────────────────────────────── */
+
+static int gatts_access_cb(uint16_t conn_handle, uint16_t attr_handle,
+                           struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
     if (!s_ctx) return BLE_ATT_ERR_UNLIKELY;
 
-    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
-        uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
-        uint8_t *buf = malloc(len);
-        if (!buf) return BLE_ATT_ERR_INSUFFICIENT_RES;
-        ble_hs_mbuf_to_flat(ctxt->om, buf, len, NULL);
-        ESP_LOGI(TAG, "RX %u bytes: %.*s", len, (int)len, (char *)buf);
-
-        for (uint16_t i = 0; i < len; i++) {
+    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR &&
+        attr_handle == s_ctx->rx_val_handle) {
+        ESP_LOGI(TAG, "RX %d bytes", ctxt->om->om_len);
+        for (size_t i = 0; i < ctxt->om->om_len; i++) {
             if (s_ctx->rx_pos < sizeof(s_ctx->rx_buf) - 1)
-                s_ctx->rx_buf[s_ctx->rx_pos++] = buf[i];
-            if (buf[i] == '\n') {
+                s_ctx->rx_buf[s_ctx->rx_pos++] = ctxt->om->om_data[i];
+            if (ctxt->om->om_data[i] == '\n') {
                 s_ctx->rx_buf[s_ctx->rx_pos] = '\0';
                 if (s_ctx->base.rx_cb)
                     s_ctx->base.rx_cb(TRANSPORT_ID_BLE,
@@ -98,228 +248,129 @@ static int nus_chr_access_cb(uint16_t conn_handle, uint16_t attr_handle,
                 s_ctx->rx_pos = 0;
             }
         }
-        free(buf);
+        return 0;
     }
-    return 0;
+    return BLE_ATT_ERR_UNLIKELY;
 }
 
-static const struct ble_gatt_svc_def s_gatt_svcs[] = {
+/* ── GATT service definition ──────────────────────────────────────── */
+
+static uint16_t s_tx_val_handle = 0;
+static uint16_t s_rx_val_handle = 0;
+
+static const struct ble_gatt_svc_def nus_gatt_svcs[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
-        .uuid = BLE_UUID128_DECLARE(NUS_SVC_UUID_BYTES),
+        .uuid = &nus_svc_uuid.u,
         .characteristics = (struct ble_gatt_chr_def[]) {
             {
-                .uuid      = BLE_UUID128_DECLARE(NUS_RX_UUID_BYTES),
-                .access_cb = nus_chr_access_cb,
-                .flags     = NUS_RX_CHR_FLAGS,
+                .uuid = &nus_tx_uuid.u,
+                .flags = BLE_GATT_CHR_F_NOTIFY,
+                .val_handle = &s_tx_val_handle,
+                .access_cb = gatts_access_cb,
             },
             {
-                .uuid       = BLE_UUID128_DECLARE(NUS_TX_UUID_BYTES),
-                .access_cb  = nus_chr_access_cb,
-                .val_handle = &s_tx_attr_handle,
-                .flags      = NUS_TX_CHR_FLAGS,
+                .uuid = &nus_rx_uuid.u,
+                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
+                .val_handle = &s_rx_val_handle,
+                .access_cb = gatts_access_cb,
             },
-            { 0 }
+            {
+                .uuid = NULL,
+            },
         },
     },
-    { 0 }
+    {
+        .type = 0,
+    },
 };
 
-static void ble_on_sync(void)
-{
-    esp_log_level_set("NimBLE", ESP_LOG_DEBUG);
-    ble_hs_util_ensure_addr(0);
-    ble_att_set_preferred_mtu(512);
-
-    /* Open NUS — no bonding, no pairing required. */
-    ble_hs_cfg.sm_io_cap  = BLE_SM_IO_CAP_NO_IO;
-    ble_hs_cfg.sm_bonding = 0;
-    ble_hs_cfg.sm_mitm    = 0;
-    ble_hs_cfg.sm_sc      = 0;
-
-    ble_start_advertising();
-}
-
-static void ble_start_advertising(void)
-{
-    struct ble_gap_adv_params adv_params = {
-        .conn_mode = BLE_GAP_CONN_MODE_UND,
-        .disc_mode = BLE_GAP_DISC_MODE_GEN,
-    };
-    uint8_t own_addr_type;
-    ble_hs_id_infer_auto(0, &own_addr_type);
-
-    /*
-     * ADV data: flags + NUS service UUID (Claude app scans by this UUID).
-     * Scan response: complete device name (must start with "Claude").
-     * Splitting is necessary because a 128-bit UUID + flags already fills
-     * the 31-byte ADV payload, leaving no room for the name.
-     */
-    ble_uuid128_t nus_svc_uuid = BLE_UUID128_INIT(NUS_SVC_UUID_BYTES);
-    struct ble_hs_adv_fields adv_fields = {
-        .flags                = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP,
-        .uuids128             = &nus_svc_uuid,
-        .num_uuids128         = 1,
-        .uuids128_is_complete = 1,
-    };
-    ble_gap_adv_set_fields(&adv_fields);
-
-    const char *name = s_ctx ? s_ctx->device_name : CONFIG_TRANSPORT_BLE_DEVICE_NAME;
-    struct ble_hs_adv_fields rsp_fields = {
-        .name             = (const uint8_t *)name,
-        .name_len         = strlen(name),
-        .name_is_complete = 1,
-    };
-    ble_gap_adv_rsp_set_fields(&rsp_fields);
-
-    ble_gap_adv_start(own_addr_type, NULL, BLE_HS_FOREVER, &adv_params,
-                      ble_gap_event_cb, NULL);
-    ESP_LOGI(TAG, "advertising as \"%s\" with NUS UUID", name);
-}
-
-static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
-{
-    if (!s_ctx) return 0;
-    switch (event->type) {
-    case BLE_GAP_EVENT_SUBSCRIBE:
-        /* Central subscribed/unsubscribed to TX notifications */
-        ESP_LOGI(TAG, "subscribe attr=%d notify=%d",
-                 event->subscribe.attr_handle, event->subscribe.cur_notify);
-        if (event->subscribe.attr_handle == s_tx_attr_handle &&
-            s_ctx->state == TRANSPORT_STATE_CONNECTED) {
-            if (event->subscribe.cur_notify) {
-                s_ctx->cccd_subscribed = true;
-                /* Re-fire connected so agent_core sends time_sync now that
-                 * notifications are permitted. Guard on state == CONNECTED
-                 * prevents a stale SUBSCRIBE after disconnect. */
-                if (s_ctx->base.state_cb)
-                    s_ctx->base.state_cb(TRANSPORT_ID_BLE, TRANSPORT_STATE_CONNECTED,
-                                         s_ctx->base.cb_ctx);
-            } else {
-                s_ctx->cccd_subscribed = false;
-            }
-        }
-        break;
-    case BLE_GAP_EVENT_CONNECT:
-        if (event->connect.status == 0) {
-            s_ctx->conn_handle = event->connect.conn_handle;
-            s_ctx->state = TRANSPORT_STATE_CONNECTED;
-            s_ctx->cccd_subscribed = false;
-            ESP_LOGI(TAG, "connected handle=%d", s_ctx->conn_handle);
-            /* Notify at physical connect so the UI wakes (screen on, BLE indicator
-             * green).  Data sending is guarded by cccd_subscribed in ble_tp_send,
-             * so no notifications reach macOS before the central subscribes. */
-            if (s_ctx->base.state_cb)
-                s_ctx->base.state_cb(TRANSPORT_ID_BLE, TRANSPORT_STATE_CONNECTED,
-                                     s_ctx->base.cb_ctx);
-        } else {
-            ble_start_advertising();
-        }
-        break;
-    case BLE_GAP_EVENT_DISCONNECT:
-        ESP_LOGI(TAG, "disconnected reason=%d", event->disconnect.reason);
-        s_ctx->conn_handle = BLE_HS_CONN_HANDLE_NONE;
-        s_ctx->state = TRANSPORT_STATE_DISCONNECTED;
-        s_ctx->cccd_subscribed = false;
-        s_secure  = false;
-        s_passkey = 0;
-        if (s_ctx->base.state_cb)
-            s_ctx->base.state_cb(TRANSPORT_ID_BLE, TRANSPORT_STATE_DISCONNECTED,
-                                 s_ctx->base.cb_ctx);
-        ble_start_advertising();
-        break;
-    case BLE_GAP_EVENT_MTU:
-        ESP_LOGI(TAG, "MTU updated: %d", event->mtu.value);
-        if (s_ctx) s_ctx->mtu = event->mtu.value;
-        break;
-
-    case BLE_GAP_EVENT_PASSKEY_ACTION: {
-        /*
-         * LE Secure Connections pairing with DISPLAY_ONLY capability.
-         * The application MUST generate a random 6-digit passkey, display it,
-         * and inject it via ble_sm_inject_io(). The user then types it on the
-         * desktop (KeyboardOnly on the central side).
-         */
-        if (event->passkey.params.action == BLE_SM_IOACT_DISP) {
-            s_passkey = esp_random() % 1000000;
-            struct ble_sm_io io = {
-                .action = BLE_SM_IOACT_DISP,
-                .passkey = s_passkey,
-            };
-            ble_sm_inject_io(event->passkey.conn_handle, &io);
-            ESP_LOGI(TAG, "=== PASSKEY: %06lu (display on screen) ===",
-                     (unsigned long)s_passkey);
-        } else if (event->passkey.params.action == BLE_SM_IOACT_NUMCMP) {
-            /* Numeric comparison - auto-accept for peripheral role */
-            struct ble_sm_io io = {
-                .action = BLE_SM_IOACT_NUMCMP,
-                .numcmp_accept = 1,
-            };
-            ble_sm_inject_io(event->passkey.conn_handle, &io);
-        }
-        break;
-    }
-
-    case BLE_GAP_EVENT_ENC_CHANGE:
-        s_secure = (event->enc_change.status == 0);
-        ESP_LOGI(TAG, "encryption %s (status=%d)",
-                 s_secure ? "OK" : "FAIL", event->enc_change.status);
-        s_passkey = 0;
-        break;
-
-    default:
-        ESP_LOGD(TAG, "gap event %d", event->type);
-        break;
-    }
-    return 0;
-}
-
-bool transport_ble_is_secure(void)
-{
-    return s_secure;
-}
-
-uint32_t transport_ble_get_passkey(void)
-{
-    return s_passkey;
-}
-
-static esp_err_t ble_tp_init(transport_t *t, const void *cfg)
-{
-    ble_ctx_t *ctx = (ble_ctx_t *)t;
-    ctx->conn_handle = BLE_HS_CONN_HANDLE_NONE;
-    ctx->state = TRANSPORT_STATE_DISCONNECTED;
-    ctx->cccd_subscribed = false;
-    return ESP_OK;
-}
+/* ── Host task ────────────────────────────────────────────────────── */
 
 static void ble_host_task(void *param)
 {
+    ESP_LOGI(TAG, "BLE Host Task Started");
     nimble_port_run();
     nimble_port_freertos_deinit();
 }
 
+static void ble_hs_sync_cb(void)
+{
+    int rc = ble_hs_util_ensure_addr(0);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ensure addr failed: %d", rc);
+    }
+    ESP_LOGI(TAG, "BLE synced, starting advertising");
+    start_advertising();
+}
+
+/* ── Transport interface ──────────────────────────────────────────── */
+
+static esp_err_t ble_tp_init(transport_t *t, const void *cfg)
+{
+    ble_ctx_t *ctx = (ble_ctx_t *)t;
+    ctx->state = TRANSPORT_STATE_DISCONNECTED;
+    ctx->cccd_subscribed = false;
+    ctx->secure = false;
+    ctx->mtu = 23;
+    ctx->conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    return ESP_OK;
+}
+
 static esp_err_t ble_tp_start(transport_t *t)
 {
-    esp_err_t rc = nimble_port_init();
-    if (rc != ESP_OK) {
-        ESP_LOGE(TAG, "nimble_port_init failed: %d", rc);
-        return rc;
+    /* Initialize NVS for BLE bonding */
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
     }
+    ESP_ERROR_CHECK(err);
+
+    /* Step 1: Initialize NimBLE host */
+    nimble_port_init();
+
+    /* Step 2: Configure host callbacks */
+    ble_hs_cfg.sync_cb = ble_hs_sync_cb;
+    ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
+
+    /* Security manager: SC + MITM + Bonding, DisplayOnly */
+    ble_hs_cfg.sm_io_cap = BLE_HS_IO_DISPLAY_ONLY;
+    ble_hs_cfg.sm_sc = 1;
+    ble_hs_cfg.sm_mitm = 1;
+    ble_hs_cfg.sm_bonding = 1;
+    ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+
+    /* Step 3: Initialize GAP/GATT services, register custom services */
     ble_svc_gap_init();
     ble_svc_gatt_init();
-    ble_gatts_count_cfg(s_gatt_svcs);
-    ble_gatts_add_svcs(s_gatt_svcs);
-    ble_hs_cfg.sync_cb = ble_on_sync;
-    if (s_ctx) ble_svc_gap_device_name_set(s_ctx->device_name);
+
+    int rc = ble_gatts_count_cfg(nus_gatt_svcs);
+    if (rc != 0) { ESP_LOGE(TAG, "ble_gatts_count_cfg: %d", rc); return ESP_FAIL; }
+
+    rc = ble_gatts_add_svcs(nus_gatt_svcs);
+    if (rc != 0) { ESP_LOGE(TAG, "ble_gatts_add_svcs: %d", rc); return ESP_FAIL; }
+
+    /* Step 4: Set device name AFTER GATT services registered */
+    ble_svc_gap_device_name_set(s_ctx->device_name);
+
+    /* Step 5: Initialize NVS storage for bonding */
+    ble_store_config_init();
+
+    /* Sync val handles */
+    s_ctx->tx_val_handle = s_tx_val_handle;
+    s_ctx->rx_val_handle = s_rx_val_handle;
+
+    /* Step 6: Start host task (triggers sync_cb → advertising) */
     nimble_port_freertos_init(ble_host_task);
+
     return ESP_OK;
 }
 
 static esp_err_t ble_tp_stop(transport_t *t)
 {
-    nimble_port_freertos_deinit();
-    nimble_port_deinit();
+    nimble_port_stop();
     return ESP_OK;
 }
 
@@ -328,15 +379,18 @@ static esp_err_t ble_tp_send(transport_t *t, const uint8_t *data, size_t len)
     ble_ctx_t *ctx = (ble_ctx_t *)t;
     if (ctx->state != TRANSPORT_STATE_CONNECTED) return ESP_ERR_INVALID_STATE;
     if (!ctx->cccd_subscribed) return ESP_ERR_INVALID_STATE;
+    if (ctx->tx_val_handle == 0) return ESP_ERR_INVALID_STATE;
 
-    size_t mtu = ctx->mtu > 20 ? ctx->mtu - 3 : 20;
+    size_t chunk = (ctx->mtu > 3) ? ctx->mtu - 3 : 20;
+    if (chunk > 180) chunk = 180;
     size_t offset = 0;
     while (offset < len) {
-        size_t chunk = (len - offset) < mtu ? (len - offset) : mtu;
-        struct os_mbuf *om = ble_hs_mbuf_from_flat(data + offset, chunk);
-        if (!om) return ESP_ERR_NO_MEM;
-        ble_gattc_notify_custom(ctx->conn_handle, s_tx_attr_handle, om);
-        offset += chunk;
+        size_t n = (len - offset < chunk) ? (len - offset) : chunk;
+        struct os_mbuf *om = ble_hs_mbuf_from_flat(data + offset, n);
+        int rc = ble_gattc_notify_custom(ctx->conn_handle, ctx->tx_val_handle, om);
+        if (rc != 0) { ESP_LOGE(TAG, "notify failed: %d", rc); return ESP_FAIL; }
+        offset += n;
+        if (offset < len) vTaskDelay(pdMS_TO_TICKS(4));
     }
     return ESP_OK;
 }
@@ -356,10 +410,13 @@ esp_err_t transport_ble_create(transport_t **out, const char *device_name, uint1
     } else {
         uint8_t mac[6] = {0};
         esp_read_mac(mac, ESP_MAC_BT);
+        /* Short name to fit in 31-byte adv data:
+         * flags(2) + 128bit UUID(18) + name overhead(2) = 22 bytes used.
+         * Only 9 chars max for device name (total must be <= 31). */
         snprintf(ctx->device_name, sizeof(ctx->device_name),
-                 "Claude-%02X%02X", mac[4], mac[5]);
+                 "Buddy%02X%02X", mac[4], mac[5]);
     }
-    ctx->mtu = mtu ? mtu : 512;
+    ctx->mtu = mtu ? mtu : 517;
     ctx->base.id        = TRANSPORT_ID_BLE;
     ctx->base.init      = ble_tp_init;
     ctx->base.start     = ble_tp_start;
@@ -374,15 +431,7 @@ esp_err_t transport_ble_create(transport_t **out, const char *device_name, uint1
 
 esp_err_t transport_ble_get_mac(uint8_t mac[6])
 {
-    uint8_t addr[6];
-    uint8_t addr_type;
-    int rc = ble_hs_id_infer_auto(0, &addr_type);
-    if (rc != 0) return ESP_FAIL;
-    rc = ble_hs_id_copy_addr(addr_type, addr, NULL);
-    if (rc != 0) return ESP_FAIL;
-    /* NimBLE stores address in little-endian; reverse to display order */
-    for (int i = 0; i < 6; i++) mac[i] = addr[5 - i];
-    return ESP_OK;
+    return esp_read_mac(mac, ESP_MAC_BT);
 }
 
 uint16_t transport_ble_get_mtu(void)
@@ -395,4 +444,14 @@ const char *transport_ble_get_device_name(void)
     return s_ctx ? s_ctx->device_name : CONFIG_TRANSPORT_BLE_DEVICE_NAME;
 }
 
-#endif /* CONFIG_TRANSPORT_BLE_ENABLED */
+bool transport_ble_is_secure(void)
+{
+    return s_ctx ? s_ctx->secure : false;
+}
+
+uint32_t transport_ble_get_passkey(void)
+{
+    return s_passkey;
+}
+
+#endif /* CONFIG_BT_NIMBLE_ENABLED */

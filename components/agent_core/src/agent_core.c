@@ -31,6 +31,7 @@ static int  s_connected_count = 0;
 
 /* Turn-complete: briefly flash BUSY for 1.5 s then auto-return to IDLE */
 static esp_timer_handle_t s_turn_timer = NULL;
+static bool s_turn_in_progress = false;
 
 /* Last known msg/running for change detection */
 static char    s_last_msg[24]     = {0};
@@ -38,6 +39,7 @@ static uint8_t s_last_running     = 0;
 
 static void turn_timer_cb(void *arg)
 {
+    s_turn_in_progress = false;
     sm_event_t e = {.type = SM_EVT_SESSION_ENDED, .timestamp_us = esp_timer_get_time()};
     sm_post_event(s_sm, &e);
 }
@@ -153,29 +155,49 @@ static void agent_task(void *arg)
             uint32_t waiting = evt.data.session.waiting;
             const char *new_msg = evt.data.session.msg;
 
+            ESP_LOGI(TAG, "--- SESSION_UPDATE: r=%lu w=%lu msg='%s' turn_in_progress=%d ---",
+                     (unsigned long)running, (unsigned long)waiting, new_msg, s_turn_in_progress);
+
             /* Primary: waiting/running fields drive the state machine */
-            if (waiting == 0 && running > 0) {
+            if (waiting > 0) {
+                /* Permission prompt — state machine will enter ATTENTION */
+                ESP_LOGI(TAG, "→ posting APPROVAL_REQUEST (waiting=%lu)", (unsigned long)waiting);
+                sm_evt.type = SM_EVT_APPROVAL_REQUEST;
+                sm_post_event(s_sm, &sm_evt);
+            } else if (waiting == 0 && running > 0) {
+                ESP_LOGI(TAG, "→ posting SESSION_STARTED (running=%lu)", (unsigned long)running);
                 sm_evt.type = SM_EVT_SESSION_STARTED;
                 sm_post_event(s_sm, &sm_evt);
                 agent_stats_record_session_start();
-            } else if (waiting == 0 && running == 0) {
-                sm_evt.type = SM_EVT_SESSION_ENDED;
-                sm_post_event(s_sm, &sm_evt);
+            } else if (waiting == 0 && running == 0 && !s_turn_in_progress) {
+                /* No active session and no turn in progress.
+                 * Check if msg changed to non-idle — Claude Desktop may not
+                 * set running>0 for regular chat turns; a msg change is the
+                 * next-best signal that Claude is working. */
+                bool msg_changed = new_msg[0] && strcmp(new_msg, s_last_msg) != 0;
+                bool msg_active  = msg_changed && (strstr(new_msg, "idle") == NULL)
+                                   && (strstr(new_msg, "ready") == NULL);
+                if (msg_active) {
+                    ESP_LOGI(TAG, "→ activity via msg: '%s' → SESSION_STARTED", new_msg);
+                    sm_evt.type = SM_EVT_SESSION_STARTED;
+                    sm_post_event(s_sm, &sm_evt);
+                    agent_stats_record_session_start();
+                    if (s_turn_timer) {
+                        esp_timer_stop(s_turn_timer);
+                        esp_timer_start_once(s_turn_timer, 1500 * 1000);
+                    }
+                } else {
+                    ESP_LOGD(TAG, "→ no state change (msg_changed=%d, msg='%s', last='%s')",
+                             msg_changed, new_msg, s_last_msg);
+                }
+                /* Otherwise: total==0 means no session at all → SLEEP,
+                 * or idle state → stay in current state. */
             }
 
-            /* Fallback: msg changed to non-idle while running==0 — Desktop may
-             * not set running>0 for regular chat turns; a msg change is the
-             * next-best signal.  Only use when primary signals are absent so we
-             * don't duplicate or override an active session. */
+            /* Update display regardless */
             bool msg_changed = new_msg[0] && strcmp(new_msg, s_last_msg) != 0;
-            bool msg_active  = msg_changed && running == 0 && waiting == 0
-                               && (strstr(new_msg, "idle") == NULL);
-            if (msg_active && s_turn_timer) {
-                ESP_LOGI(TAG, "activity detected via msg: %s", new_msg);
-                sm_evt.type = SM_EVT_SESSION_STARTED;
-                sm_post_event(s_sm, &sm_evt);
-                esp_timer_stop(s_turn_timer);
-                esp_timer_start_once(s_turn_timer, 1500 * 1000);
+            if (msg_changed) {
+                ESP_LOGI(TAG, "msg changed: '%s' → '%s'", s_last_msg, new_msg);
             }
             s_last_running = (uint8_t)(running > 255 ? 255 : running);
             strlcpy(s_last_msg, new_msg, sizeof(s_last_msg));
@@ -229,12 +251,14 @@ static void agent_task(void *arg)
 
         case AGENT_EVT_TURN_COMPLETE:
             /* Flash BUSY for 1.5 s so the display shows activity */
+            s_turn_in_progress = true;
             sm_evt.type = SM_EVT_SESSION_STARTED;
             sm_post_event(s_sm, &sm_evt);
             if (s_turn_timer) {
                 esp_timer_stop(s_turn_timer);
                 esp_timer_start_once(s_turn_timer, 1500 * 1000);
             }
+            ESP_LOGI(TAG, "turn complete → BUSY 1.5s");
             break;
 
         case AGENT_EVT_CMD: {

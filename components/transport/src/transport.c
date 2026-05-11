@@ -80,8 +80,11 @@ esp_err_t transport_send_all(const uint8_t *data, size_t len)
     for (int i = 0; i < TRANSPORT_MAX_INSTANCES; i++) {
         if (!s_transports[i]) continue;
         transport_state_t st = s_transports[i]->get_state(s_transports[i]);
-        if (st == TRANSPORT_STATE_CONNECTED)
-            s_transports[i]->send(s_transports[i], data, len);
+        if (st == TRANSPORT_STATE_CONNECTED) {
+            esp_err_t r = s_transports[i]->send(s_transports[i], data, len);
+            ESP_LOGI(TAG, "TX [id=%d state=%d] r=%d: %.*s",
+                     i, st, r, (int)(len < 128 ? len : 128), (const char *)data);
+        }
     }
     return ESP_OK;
 }

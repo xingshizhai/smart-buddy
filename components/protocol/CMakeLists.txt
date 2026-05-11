@@ -10,4 +10,5 @@ idf_component_register(
         cjson
         log
         esp_timer
+        transport
 )

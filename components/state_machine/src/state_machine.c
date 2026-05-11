@@ -102,6 +102,16 @@ esp_err_t sm_post_event(sm_handle_t handle, const sm_event_t *evt)
     xSemaphoreTake(ctx->lock, portMAX_DELAY);
     sm_state_t s = ctx->state;
 
+    static const char *evt_names[] = {
+        "TRANSPORT_CONNECTED", "TRANSPORT_DISCONNECTED",
+        "SESSION_STARTED", "SESSION_ENDED",
+        "APPROVAL_REQUEST", "APPROVAL_RESOLVED",
+        "TOKEN_MILESTONE", "SHAKE_DETECTED",
+        "FACE_DOWN", "FACE_UP", "TIMER_EXPIRED",
+    };
+    const char *evt_name = (evt->type < SM_EVT_MAX) ? evt_names[evt->type] : "UNKNOWN";
+    ESP_LOGI(TAG, "SM: state=%s evt=%s", sm_state_name(s), evt_name);
+
     switch (evt->type) {
     case SM_EVT_TRANSPORT_DISCONNECTED:
         enter_state(ctx, SM_STATE_SLEEP, 0);

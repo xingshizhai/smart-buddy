@@ -76,20 +76,27 @@ static void start_advertising(void)
     memset(&fields, 0, sizeof(fields));
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
 
-    /* Advertise the 128-bit NUS service UUID so Claude Desktop can
-     * discover this device by filtering on the service UUID. */
+    /* Adv packet: flags + NUS UUID + shortened name "Claude".
+     * Budget: 3 (flags) + 18 (uuid128) + 8 ("Claude" + 2 overhead) = 29 B.
+     * The shortened name ensures macOS passive-scan sees "claude…" even
+     * before receiving the scan response, satisfying Claude Desktop's
+     * c.startsWith("claude") filter. */
     fields.uuids128 = (ble_uuid128_t *)&nus_svc_uuid;
     fields.num_uuids128 = 1;
     fields.uuids128_is_complete = 1;
+    fields.name = (const uint8_t *)"Claude";
+    fields.name_len = 6;
+    fields.name_is_complete = 0;   /* AD type 0x08 = Shortened Local Name */
 
     int rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
-        ESP_LOGE(TAG, "adv set fields: %d", rc);
+        ESP_LOGE(TAG, "adv set fields failed: rc=%d (packet too large?)", rc);
         return;
     }
+    ESP_LOGI(TAG, "adv fields OK: flags=0x%02x uuid128_count=%d",
+             fields.flags, fields.num_uuids128);
 
-    /* Put device name in scan response to stay within the 31-byte
-     * advertising packet limit. */
+    /* Scan response: full unique name "ClaudeXXYY". */
     const char *name = ble_svc_gap_device_name();
     if (name && name[0]) {
         struct ble_hs_adv_fields rsp;
@@ -113,8 +120,11 @@ static void start_advertising(void)
     }
 
     struct ble_gap_adv_params adv_params = {0};
-    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
-    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    adv_params.conn_mode  = BLE_GAP_CONN_MODE_UND;
+    adv_params.disc_mode  = BLE_GAP_DISC_MODE_GEN;
+    /* 100 ms interval — fast enough for reliable discovery without burning power */
+    adv_params.itvl_min = BLE_GAP_ADV_ITVL_MS(100);
+    adv_params.itvl_max = BLE_GAP_ADV_ITVL_MS(100);
 
     rc = ble_gap_adv_start(own_addr_type, NULL, BLE_HS_FOREVER,
                            &adv_params, ble_gap_event_cb, NULL);
@@ -135,9 +145,8 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
             s_ctx->state = TRANSPORT_STATE_CONNECTED;
             s_ctx->secure = false;
             s_ctx->cccd_subscribed = false;
+            s_passkey = 0;
             ESP_LOGI(TAG, "connected conn_handle=%d", s_ctx->conn_handle);
-            /* Generate random passkey for new connections */
-            s_passkey = (esp_random() % 1000000);
             if (s_ctx->base.state_cb)
                 s_ctx->base.state_cb(TRANSPORT_ID_BLE, TRANSPORT_STATE_CONNECTED,
                                      s_ctx->base.cb_ctx);
@@ -191,6 +200,7 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_PASSKEY_ACTION: {
         if (event->passkey.params.action == BLE_SM_IOACT_DISP) {
+            s_passkey = (esp_random() % 1000000);
             struct ble_sm_io pkey = {0};
             pkey.action = BLE_SM_IOACT_DISP;
             pkey.passkey = s_passkey;
@@ -214,7 +224,8 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
         return 0;
 
     case BLE_GAP_EVENT_SUBSCRIBE:
-        if (event->subscribe.attr_handle == s_ctx->tx_val_handle + 1) {
+        /* NimBLE reports the characteristic VALUE handle in attr_handle, not the CCCD handle. */
+        if (event->subscribe.attr_handle == s_ctx->tx_val_handle) {
             s_ctx->cccd_subscribed = (event->subscribe.cur_notify != 0);
             ESP_LOGI(TAG, "TX notify %s", s_ctx->cccd_subscribed ? "on" : "off");
         }
@@ -300,6 +311,14 @@ static void ble_hs_sync_cb(void)
     if (rc != 0) {
         ESP_LOGE(TAG, "ensure addr failed: %d", rc);
     }
+    /* NimBLE assigns GATT handles during host startup, before sync_cb fires.
+     * Copy them here — copying earlier (in ble_tp_start) reads 0s. */
+    if (s_ctx) {
+        s_ctx->tx_val_handle = s_tx_val_handle;
+        s_ctx->rx_val_handle = s_rx_val_handle;
+        ESP_LOGI(TAG, "GATT handles: tx=%d rx=%d",
+                 s_ctx->tx_val_handle, s_ctx->rx_val_handle);
+    }
     ESP_LOGI(TAG, "BLE synced, starting advertising");
     start_advertising();
 }
@@ -334,12 +353,12 @@ static esp_err_t ble_tp_start(transport_t *t)
     ble_hs_cfg.sync_cb = ble_hs_sync_cb;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
 
-    /* Security manager: SC + MITM + Bonding, DisplayOnly */
-    ble_hs_cfg.sm_io_cap = BLE_HS_IO_DISPLAY_ONLY;
-    ble_hs_cfg.sm_sc = 1;
-    ble_hs_cfg.sm_mitm = 1;
+    /* macOS / Claude Desktop does not support passkey entry; use Just-Works. */
+    ble_hs_cfg.sm_io_cap  = BLE_HS_IO_NO_INPUT_OUTPUT;
+    ble_hs_cfg.sm_mitm    = 0;
+    ble_hs_cfg.sm_sc      = 1;
     ble_hs_cfg.sm_bonding = 1;
-    ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_our_key_dist   = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
 
     /* Step 3: Initialize GAP/GATT services, register custom services */
@@ -358,9 +377,7 @@ static esp_err_t ble_tp_start(transport_t *t)
     /* Step 5: Initialize NVS storage for bonding */
     ble_store_config_init();
 
-    /* Sync val handles */
-    s_ctx->tx_val_handle = s_tx_val_handle;
-    s_ctx->rx_val_handle = s_rx_val_handle;
+    /* Note: val handles are synced in ble_hs_sync_cb() after NimBLE assigns them. */
 
     /* Step 6: Start host task (triggers sync_cb → advertising) */
     nimble_port_freertos_init(ble_host_task);
@@ -414,7 +431,7 @@ esp_err_t transport_ble_create(transport_t **out, const char *device_name, uint1
          * flags(2) + 128bit UUID(18) + name overhead(2) = 22 bytes used.
          * Only 9 chars max for device name (total must be <= 31). */
         snprintf(ctx->device_name, sizeof(ctx->device_name),
-                 "Buddy%02X%02X", mac[4], mac[5]);
+                 "Claude%02X%02X", mac[4], mac[5]);
     }
     ctx->mtu = mtu ? mtu : 517;
     ctx->base.id        = TRANSPORT_ID_BLE;

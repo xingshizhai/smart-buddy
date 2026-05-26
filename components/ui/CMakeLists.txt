@@ -20,7 +20,7 @@ idf_component_register(
         transport
         audio_manager
         log
-        lvgl__lvgl
+        lvgl__lvgl  # Public headers expose lv_font_t, lv_color_t, lv_obj_t
     PRIV_REQUIRES
         espressif__esp_lvgl_port
 )

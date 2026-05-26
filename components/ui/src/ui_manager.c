@@ -7,6 +7,7 @@
 #include "esp_lvgl_port.h"
 #include "ui/ui_manager.h"
 #include "ui/ui_theme.h"
+#include "ui/ui_fonts.h"
 #include "ui/persona.h"
 #include "buddy_hal/hal.h"
 #include "buddy_hal/agent_events.h"
@@ -266,7 +267,7 @@ static lv_obj_t *screen_main_create(void)
     s_main_content_label = lv_label_create(hero);
     lv_label_set_text(s_main_content_label, "Connect via Hardware Buddy");
     lv_obj_set_style_text_color(s_main_content_label, p->text_muted, 0);
-    lv_obj_set_style_text_font(s_main_content_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(s_main_content_label, &g_font_14_cjk, 0);
     lv_obj_set_width(s_main_content_label, 272);
     lv_label_set_long_mode(s_main_content_label, LV_LABEL_LONG_WRAP);
     lv_obj_align(s_main_content_label, LV_ALIGN_BOTTOM_MID, 0, -8);
@@ -293,7 +294,7 @@ static lv_obj_t *screen_main_create(void)
     s_transcript_label = lv_label_create(s_transcript_area);
     lv_label_set_text(s_transcript_label, "");
     lv_obj_set_style_text_color(s_transcript_label, p->text_muted, 0);
-    lv_obj_set_style_text_font(s_transcript_label, &lv_font_unscii_8, 0);
+    lv_obj_set_style_text_font(s_transcript_label, &g_font_14_cjk, 0);
     lv_obj_set_width(s_transcript_label, 286);
     lv_label_set_long_mode(s_transcript_label, LV_LABEL_LONG_SCROLL_CIRCULAR);
     lv_obj_align(s_transcript_label, LV_ALIGN_TOP_LEFT, 2, 2);
@@ -328,6 +329,7 @@ static lv_obj_t *screen_approval_create(void)
     lv_obj_set_width(s_approval_hint, 284);
     lv_label_set_long_mode(s_approval_hint, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(s_approval_hint, p->text_muted, 0);
+    lv_obj_set_style_text_font(s_approval_hint, &g_font_14_cjk, 0);
     lv_obj_align(s_approval_hint, LV_ALIGN_TOP_LEFT, 10, 58);
 
     /* Approve button */

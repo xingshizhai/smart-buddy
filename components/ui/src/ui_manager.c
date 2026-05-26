@@ -142,7 +142,8 @@ static void approval_timeout_cb(lv_timer_t *t)
     strlcpy(evt.data.approval_resp.id, s_approval_id_store,
             sizeof(evt.data.approval_resp.id));
     agent_core_post_event(&evt);
-    lv_timer_del(s_approval_timer);
+    /* repeat_count=1: LVGL auto-deletes this timer after the callback returns.
+     * Do NOT call lv_timer_del here — that would be a double-free. */
     s_approval_timer = NULL;
 }
 
@@ -186,7 +187,11 @@ void ui_approval_handle_key(bool approved)
     strlcpy(evt.data.approval_resp.id, s_approval_id_store,
             sizeof(evt.data.approval_resp.id));
     agent_core_post_event(&evt);
-    stop_approval_timers();
+    /* Called from button task (FreeRTOS), not LVGL context — must hold lock. */
+    if (lvgl_port_lock(100)) {
+        stop_approval_timers();
+        lvgl_port_unlock();
+    }
 }
 
 static lv_obj_t *screen_boot_create(void)
@@ -805,29 +810,30 @@ void ui_screen_main_set_entries(const char (*entries)[92], uint8_t n)
 
 void ui_screen_approval_set_prompt(const char *tool, const char *hint, const char *id)
 {
-    if (lvgl_port_lock(100)) {
-        if (s_approval_tool) {
-            char buf[64];
-            snprintf(buf, sizeof(buf), "Tool: %s", tool ? tool : "?");
-            lv_label_set_text(s_approval_tool, buf);
-        }
-        if (s_approval_hint)
-            lv_label_set_text(s_approval_hint, hint ? hint : "");
-        if (id)
-            strlcpy(s_approval_id_store, id, sizeof(s_approval_id_store));
-        if (s_approval_arc)
-            lv_arc_set_value(s_approval_arc, 100);
-        lvgl_port_unlock();
+    /* All LVGL operations (label updates + timer create/delete) must be under
+     * the port lock — this function is called from agent_task, not LVGL task. */
+    if (!lvgl_port_lock(100)) return;
+
+    if (s_approval_tool) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Tool: %s", tool ? tool : "?");
+        lv_label_set_text(s_approval_tool, buf);
     }
+    if (s_approval_hint)
+        lv_label_set_text(s_approval_hint, hint ? hint : "");
+    if (id)
+        strlcpy(s_approval_id_store, id, sizeof(s_approval_id_store));
+    if (s_approval_arc)
+        lv_arc_set_value(s_approval_arc, 100);
 
     stop_approval_timers();
     s_arc_timeout_ms = CONFIG_UI_APPROVAL_TIMEOUT_S * 1000;
     s_arc_elapsed_ms = 0;
     s_arc_timer = lv_timer_create(arc_tick_cb, 250, NULL);
-
-    s_approval_timer = lv_timer_create(approval_timeout_cb,
-                                        s_arc_timeout_ms, NULL);
+    s_approval_timer = lv_timer_create(approval_timeout_cb, s_arc_timeout_ms, NULL);
     lv_timer_set_repeat_count(s_approval_timer, 1);
+
+    lvgl_port_unlock();
 }
 
 void ui_screen_status_refresh(void)

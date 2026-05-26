@@ -190,9 +190,10 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
         s_ctx->secure = false;
         s_ctx->cccd_subscribed = false;
         s_passkey = 0;
-        if (s_ctx->base.state_cb)
-            s_ctx->base.state_cb(TRANSPORT_ID_BLE, TRANSPORT_STATE_DISCONNECTED,
-                                 s_ctx->base.cb_ctx);
+        /* Use deferred callback (same as CONNECT) to keep NimBLE host task
+         * stack clear of agent_core → state_machine call chains. */
+        fire_state_cb_async(TRANSPORT_ID_BLE, TRANSPORT_STATE_DISCONNECTED,
+                            s_ctx->base.cb_ctx);
         start_advertising();
         return 0;
 

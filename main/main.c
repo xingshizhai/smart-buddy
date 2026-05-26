@@ -17,6 +17,7 @@
 #include "imu_monitor.h"
 #include "audio_manager.h"
 #include "ui/ui_manager.h"
+#include "ui/ui_fonts.h"
 #include "ui/ui_button_router.h"
 #include "app_config.h"
 
@@ -170,6 +171,7 @@ void app_main(void)
     ESP_ERROR_CHECK(audio_manager_init(g_hal.audio));
 
     /* 4. UI — show boot screen */
+    ui_fonts_init();
     ESP_ERROR_CHECK(ui_manager_init());
     ui_manager_show(UI_SCREEN_BOOT, UI_ANIM_NONE);
 

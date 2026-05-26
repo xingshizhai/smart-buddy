@@ -20,7 +20,7 @@ idf_component_register(
         transport
         audio_manager
         log
-    PRIV_REQUIRES
         lvgl__lvgl
+    PRIV_REQUIRES
         espressif__esp_lvgl_port
 )

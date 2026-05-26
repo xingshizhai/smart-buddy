@@ -33,7 +33,8 @@ typedef struct {
             uint32_t waiting;
             uint32_t tokens_total;
             uint32_t tokens_today;
-            char     msg[24];         /* one-line status from desktop */
+            bool     completed;       /* doc["completed"] — true after each assistant turn */
+            char     msg[48];         /* one-line status from desktop */
             char     entries[8][92];  /* transcript lines, newest first */
             uint8_t  n_entries;
         } session;
@@ -62,7 +63,7 @@ typedef struct {
         } imu;
         struct {
             char name[32];    /* "owner", "name", "status", "unpair" */
-            char value[64];   /* optional payload, e.g. owner/device name */
+            char value[128];  /* optional payload, e.g. owner/device name */
         } cmd;
     } data;
     int64_t timestamp_us;

@@ -87,6 +87,8 @@ static esp_err_t claude_buddy_decode(proto_t *proto,
         e->data.session.waiting      = waiting_j      ? (uint32_t)waiting_j->valuedouble      : 0;
         e->data.session.tokens_total = tokens_j       ? (uint32_t)tokens_j->valuedouble       : 0;
         e->data.session.tokens_today = tokens_today_j ? (uint32_t)tokens_today_j->valuedouble : 0;
+        cJSON *completed_j = cJSON_GetObjectItem(root, "completed");
+        e->data.session.completed = cJSON_IsTrue(completed_j);
         e->timestamp_us = esp_timer_get_time();
 
         /* Optional display fields */
@@ -108,7 +110,7 @@ static esp_err_t claude_buddy_decode(proto_t *proto,
         }
 
         /* Debug: dump all heartbeat fields */
-        ESP_LOGI(TAG, "HB r=%lu w=%lu tok=%lu tok_today=%lu total=%lu msg='%s' n_entries=%d",
+        ESP_LOGD(TAG, "HB r=%lu w=%lu tok=%lu tok_today=%lu total=%lu msg='%s' n_entries=%d",
                  (unsigned long)e->data.session.running,
                  (unsigned long)e->data.session.waiting,
                  (unsigned long)e->data.session.tokens_total,
@@ -116,6 +118,8 @@ static esp_err_t claude_buddy_decode(proto_t *proto,
                  (unsigned long)(total_j ? (uint32_t)total_j->valuedouble : 0),
                  e->data.session.msg,
                  e->data.session.n_entries);
+        if (e->data.session.completed)
+            ESP_LOGI(TAG, "HB completed=true → CELEBRATE");
 
         /* Token milestone */
         uint32_t tok = e->data.session.tokens_total;
@@ -192,7 +196,7 @@ static esp_err_t claude_buddy_decode(proto_t *proto,
         if (cJSON_IsString(val_j))
             strlcpy(ce->data.cmd.value, val_j->valuestring, sizeof(ce->data.cmd.value));
         ce->timestamp_us = esp_timer_get_time();
-        ESP_LOGI(TAG, "cmd received: %s", ce->data.cmd.name);
+        ESP_LOGD(TAG, "cmd received: %s", ce->data.cmd.name);
     }
 
     *n_events = idx;
@@ -250,7 +254,7 @@ static esp_err_t claude_buddy_encode(proto_t *proto,
             cJSON *stats = cJSON_CreateObject();
             cJSON_AddItemToObject(data, "stats", stats);
             cJSON_AddItemToObject(root, "data", data);
-            ESP_LOGI(TAG, "status ack: name=%s sec=%d heap=%lu",
+            ESP_LOGD(TAG, "status ack: name=%s sec=%d heap=%lu",
                      transport_ble_get_device_name(),
                      transport_ble_is_secure() ? 1 : 0,
                      (unsigned long)esp_get_free_heap_size());

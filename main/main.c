@@ -17,6 +17,7 @@
 #include "imu_monitor.h"
 #include "audio_manager.h"
 #include "ui/ui_manager.h"
+#include "ui/ui_button_router.h"
 #include "app_config.h"
 
 #define TAG "MAIN"
@@ -41,6 +42,13 @@
 #endif
 
 static sm_handle_t s_sm = NULL;
+
+/* LEFT long-press handler: open pet stats */
+static void left_long_press_cb(hal_button_id_t id, hal_button_event_t evt, void *ctx)
+{
+    (void)id; (void)evt; (void)ctx;
+    ui_button_router_handle(BTN_ACTION_LEFT_LONG);
+}
 
 /* ── Push-to-talk ────────────────────────────────────────────────────── */
 
@@ -67,20 +75,27 @@ static void ptt_button_cb(hal_button_id_t id, hal_button_event_t evt, void *ctx)
     }
 }
 
-/* A-key / BOOT long-press: Approve in ATTENTION; simulate turn-complete otherwise */
+/* A-key / BOOT long-press: Approve in ATTENTION; open menu otherwise */
 static void approve_button_cb(hal_button_id_t id, hal_button_event_t evt, void *ctx)
 {
     if (sm_get_state(s_sm) == SM_STATE_ATTENTION) {
         ui_approval_handle_key(true);
         return;
     }
-    /* IDLE or any non-ATTENTION state: simulate a completed turn to test BUSY flash */
-    agent_event_t test_evt = {
-        .type = AGENT_EVT_TURN_COMPLETE,
-        .timestamp_us = esp_timer_get_time(),
-    };
-    agent_core_post_event(&test_evt);
-    ESP_LOGI("BTN", "simulated turn-complete (state=%d)", sm_get_state(s_sm));
+    /* IDLE or any non-ATTENTION state: open menu overlay */
+    ui_button_router_handle(BTN_ACTION_CENTER_LONG);
+    ESP_LOGI("BTN", "menu opened (state=%d)", sm_get_state(s_sm));
+}
+
+/* LEFT (mute): deny during ATTENTION; back/stats otherwise */
+static void left_button_cb(hal_button_id_t id, hal_button_event_t evt, void *ctx)
+{
+    (void)id; (void)evt; (void)ctx;
+    if (sm_get_state(s_sm) == SM_STATE_ATTENTION) {
+        ui_approval_handle_key(false);  /* Deny */
+        return;
+    }
+    ui_button_router_handle(BTN_ACTION_LEFT_SHORT);
 }
 
 /* ── Periodic tasks ─────────────────────────────────────────────────── */
@@ -102,15 +117,8 @@ static void heartbeat_task(void *arg)
             }
         }
 
-        proto_t *proto = proto_get_active();
-        if (!proto) continue;
-
-        proto_out_msg_t msg = {.type = PROTO_MSG_HEARTBEAT_ACK};
-        uint8_t *enc = NULL; size_t enc_len = 0;
-        if (proto->encode(proto, &msg, &enc, &enc_len) == ESP_OK) {
-            transport_send_all(enc, enc_len);
-            free(enc);
-        }
+        /* Heartbeat ACK is sent by agent_core only after receiving
+         * a desktop heartbeat snapshot. Do not send unsolicited ACKs here. */
     }
 }
 
@@ -187,7 +195,7 @@ void app_main(void)
     if (proto) proto_set_active(proto->name);
 
     /* 7. Transport layer */
-    transport_t *ble = NULL, *ws = NULL, *usb = NULL;
+    transport_t *ble = NULL, *ws = NULL;
 
 #if CONFIG_TRANSPORT_BLE_ENABLED
     ESP_ERROR_CHECK(transport_ble_create(&ble, NULL, 0));
@@ -199,11 +207,6 @@ void app_main(void)
     ESP_ERROR_CHECK(transport_register(ws));
 #endif
 
-#if CONFIG_TRANSPORT_USB_ENABLED
-    ESP_ERROR_CHECK(transport_usb_create(&usb));
-    ESP_ERROR_CHECK(transport_register(usb));
-#endif
-
     /* 8. Agent core */
     ESP_ERROR_CHECK(agent_core_init(s_sm));
     ESP_ERROR_CHECK(agent_core_start());
@@ -213,17 +216,22 @@ void app_main(void)
 
     /* 9b. Audio manager tasks + PTT button (BTN_0 = center/mute button) */
     ESP_ERROR_CHECK(audio_manager_start());
+    ui_button_router_init();
     if (g_hal.buttons) {
-        /* BOOT: PTT short-press; long-press simulates turn-complete for state testing */
+        /* BOOT: PTT short-press; long-press opens menu */
         g_hal.buttons->register_cb(g_hal.buttons, HAL_BTN_BOOT,
                                     HAL_BTN_EVT_PRESS_DOWN, ptt_button_cb, NULL);
         g_hal.buttons->register_cb(g_hal.buttons, HAL_BTN_BOOT,
                                     HAL_BTN_EVT_PRESS_UP,   ptt_button_cb, NULL);
         g_hal.buttons->register_cb(g_hal.buttons, HAL_BTN_BOOT,
                                     HAL_BTN_EVT_LONG_PRESS, approve_button_cb, NULL);
-        /* LEFT (mute): Approve (A-key) during ATTENTION */
+        /* LEFT (mute): deny during ATTENTION; back/stats otherwise */
         g_hal.buttons->register_cb(g_hal.buttons, HAL_BTN_LEFT,
-                                    HAL_BTN_EVT_PRESS_DOWN, approve_button_cb, NULL);
+                                    HAL_BTN_EVT_PRESS_DOWN, left_button_cb, NULL);
+        /* LEFT long-press: open pet stats */
+        g_hal.buttons->register_cb(g_hal.buttons, HAL_BTN_LEFT,
+                                    HAL_BTN_EVT_LONG_PRESS,
+                                    left_long_press_cb, NULL);
     }
 
     /* 10. Periodic background tasks */

@@ -1,7 +1,9 @@
 #include "ui/persona.h"
 #include "lvgl.h"
+#include "esp_log.h"
 #include "esp_random.h"
 
+#define TAG "PERSONA"
 #define DRIVER_TICK_MS 150
 
 static persona_frame_cb_t s_cb;
@@ -17,6 +19,8 @@ static void push_frame(void)
     if (!s_cb) return;
     const persona_t      *p = g_personas[s_persona_idx];
     const persona_anim_t *a = &p->anims[s_state];
+    ESP_LOGD(TAG, "push_frame: persona=%d state=%d frame=%d text=%.20s",
+             s_persona_idx, s_state, s_frame_idx, a->frames[s_frame_idx]);
     s_cb(a->frames[s_frame_idx], s_ctx);
 }
 
@@ -55,6 +59,7 @@ void persona_driver_deinit(void)
 void persona_driver_set_state(sm_state_t state)
 {
     if (state >= SM_STATE_MAX) return;
+    ESP_LOGI(TAG, "set_state: %d -> %d", s_state, state);
     s_state      = state;
     s_frame_idx  = 0;
     s_elapsed_ms = 0;

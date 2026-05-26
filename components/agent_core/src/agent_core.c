@@ -46,7 +46,7 @@ static void turn_timer_cb(void *arg)
 
 static void on_transport_rx(transport_id_t id, const uint8_t *data, size_t len, void *ctx)
 {
-    ESP_LOGI(TAG, "RX [t=%d]: %.*s", id, (int)len, (const char *)data);
+    ESP_LOGD(TAG, "RX [t=%d]: %.*s", id, (int)len, (const char *)data);
 
     proto_t *proto = proto_get_active();
     if (!proto) return;
@@ -128,14 +128,8 @@ static void agent_task(void *arg)
                 s_connected_count++;
                 sm_evt.type = SM_EVT_TRANSPORT_CONNECTED;
                 sm_post_event(s_sm, &sm_evt);
-                /* For BLE: defer time_sync until CCCD subscription (re-fire below).
-                 * The cccd_subscribed guard in ble_tp_send blocks notifications
-                 * until then — sending before CCCD causes macOS to disconnect. */
-                if (tid != TRANSPORT_ID_BLE)
-                    send_time_sync();
-            } else if (connected && s_transport_up[tid] && tid == TRANSPORT_ID_BLE) {
-                /* Re-fired after CCCD subscription — safe to send notifications now */
-                ESP_LOGI(TAG, "BLE CCCD subscribed, sending time sync");
+                /* CONNECTED fires only after TX is ready (BLE: after CCCD;
+                 * other transports: immediately). Safe to send now. */
                 send_time_sync();
             } else if (!connected && s_transport_up[tid]) {
                 s_transport_up[tid] = false;
@@ -164,6 +158,16 @@ static void agent_task(void *arg)
                 ESP_LOGI(TAG, "→ posting APPROVAL_REQUEST (waiting=%lu)", (unsigned long)waiting);
                 sm_evt.type = SM_EVT_APPROVAL_REQUEST;
                 sm_post_event(s_sm, &sm_evt);
+            } else if (evt.data.session.completed && !s_turn_in_progress) {
+                /* completed=true: Claude finished a response → CELEBRATE */
+                ESP_LOGI(TAG, "→ completed=true → SESSION_ENDED (CELEBRATE)");
+                sm_evt.type = SM_EVT_SESSION_ENDED;
+                sm_post_event(s_sm, &sm_evt);
+                s_turn_in_progress = true;
+                if (s_turn_timer) {
+                    esp_timer_stop(s_turn_timer);
+                    esp_timer_start_once(s_turn_timer, 3000 * 1000);
+                }
             } else if (waiting == 0 && running > 0) {
                 ESP_LOGI(TAG, "→ posting SESSION_STARTED (running=%lu)", (unsigned long)running);
                 sm_evt.type = SM_EVT_SESSION_STARTED;
@@ -210,6 +214,20 @@ static void agent_task(void *arg)
             ui_screen_main_set_entries(
                 (const char (*)[92])evt.data.session.entries,
                 evt.data.session.n_entries);
+
+            /* Send heartbeat ack — required by protocol or desktop stops
+             * sending heartbeats and eventually disconnects. */
+            {
+                proto_t *proto = proto_get_active();
+                if (proto) {
+                    proto_out_msg_t ack = { .type = PROTO_MSG_HEARTBEAT_ACK };
+                    uint8_t *enc = NULL; size_t enc_len = 0;
+                    if (proto->encode(proto, &ack, &enc, &enc_len) == ESP_OK) {
+                        transport_send_all(enc, enc_len);
+                        free(enc);
+                    }
+                }
+            }
             break;
         }
 
@@ -265,7 +283,7 @@ static void agent_task(void *arg)
             /* Incoming desktop command — send required ack per protocol spec.
              * Without acks the desktop may withhold heartbeats. */
             const char *cmd = evt.data.cmd.name;
-            ESP_LOGI(TAG, "cmd: %s value=%s", cmd, evt.data.cmd.value);
+            ESP_LOGD(TAG, "cmd: %s value=%s", cmd, evt.data.cmd.value);
 
             proto_t *proto = proto_get_active();
             if (!proto) break;

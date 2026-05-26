@@ -29,6 +29,7 @@
 void ble_store_config_init(void);
 
 #define TAG "BLE"
+#define BLE_SCAN_RSP_MAX_NAME_LEN 29
 
 typedef struct {
     transport_t         base;
@@ -46,6 +47,28 @@ typedef struct {
 
 static ble_ctx_t *s_ctx = NULL;
 static uint32_t s_passkey = 0;
+
+/* Deferred state callback — fired asynchronously via esp_timer to avoid
+ * calling into the upper layer (agent_core → state_machine → LVGL) from
+ * within the NimBLE host task's stack, which caused stack overflow. */
+static esp_timer_handle_t s_state_timer = NULL;
+static transport_id_t     s_pending_state_id = 0;
+static transport_state_t  s_pending_state    = TRANSPORT_STATE_DISCONNECTED;
+static void *             s_pending_state_ctx = NULL;
+
+static void deferred_state_cb(void *arg)
+{
+    if (s_ctx && s_ctx->base.state_cb)
+        s_ctx->base.state_cb(s_pending_state_id, s_pending_state, s_pending_state_ctx);
+}
+
+static void fire_state_cb_async(transport_id_t id, transport_state_t state, void *ctx)
+{
+    s_pending_state_id = id;
+    s_pending_state = state;
+    s_pending_state_ctx = ctx;
+    esp_timer_start_once(s_state_timer, 0);  /* fire ASAP after returning to event loop */
+}
 
 static void start_advertising(void);
 static int ble_gap_event_cb(struct ble_gap_event *event, void *arg);
@@ -94,13 +117,17 @@ static void start_advertising(void)
     if (name && name[0]) {
         struct ble_hs_adv_fields rsp;
         memset(&rsp, 0, sizeof(rsp));
+        size_t name_len = strnlen(name, BLE_SCAN_RSP_MAX_NAME_LEN);
         rsp.name = (const uint8_t *)name;
-        rsp.name_len = strlen(name);
+        rsp.name_len = name_len;
         rsp.name_is_complete = 1;
         rc = ble_gap_adv_rsp_set_fields(&rsp);
         if (rc != 0) {
             ESP_LOGE(TAG, "adv rsp set fields: %d", rc);
             return;
+        }
+        if (name[name_len] != '\0') {
+            ESP_LOGW(TAG, "device name too long for scan response, truncated to %d bytes", BLE_SCAN_RSP_MAX_NAME_LEN);
         }
         ESP_LOGI(TAG, "device name: '%s' (len=%d)", name, rsp.name_len);
     }
@@ -136,13 +163,10 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
             s_ctx->secure = false;
             s_ctx->cccd_subscribed = false;
             ESP_LOGI(TAG, "connected conn_handle=%d", s_ctx->conn_handle);
-            /* Generate random passkey for new connections */
-            s_passkey = (esp_random() % 1000000);
-            if (s_ctx->base.state_cb)
-                s_ctx->base.state_cb(TRANSPORT_ID_BLE, TRANSPORT_STATE_CONNECTED,
-                                     s_ctx->base.cb_ctx);
-            /* Initiate encryption (will use existing bond if available) */
-            ble_gap_security_initiate(event->connect.conn_handle);
+            /* Do NOT fire state_cb(CONNECTED) yet — wait for CCCD subscription
+             * so the first TX (heartbeat ack) succeeds immediately. */
+            /* Keep link establishment permissive to avoid desktop-side
+             * disconnect loops on security negotiation failures. */
         } else {
             ESP_LOGE(TAG, "connect failed rc=%d", event->connect.status);
             start_advertising();
@@ -169,12 +193,23 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_ENC_CHANGE:
         if (event->enc_change.status == 0) {
             s_ctx->secure = true;
+            s_passkey = 0;
             ESP_LOGI(TAG, "encryption OK");
-            if (s_ctx->base.state_cb)
-                s_ctx->base.state_cb(TRANSPORT_ID_BLE, TRANSPORT_STATE_CONNECTED,
-                                     s_ctx->base.cb_ctx);
+            /* Only fire CONNECTED if CCCD is already subscribed; otherwise
+             * BLE_GAP_EVENT_SUBSCRIBE will fire it when the time is right. */
+            if (s_ctx->cccd_subscribed)
+                fire_state_cb_async(TRANSPORT_ID_BLE, TRANSPORT_STATE_CONNECTED,
+                                    s_ctx->base.cb_ctx);
         } else {
-            ESP_LOGE(TAG, "encryption FAIL status=%d", event->enc_change.status);
+            ESP_LOGW(TAG, "encryption FAIL status=%d — clearing stale bond, re-pairing",
+                     event->enc_change.status);
+            /* Stale LTK on desktop side: delete our stored bond and re-pair
+             * with Just-Works so the link stays up this session. */
+            struct ble_gap_conn_desc desc;
+            if (ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0) {
+                ble_store_util_delete_peer(&desc.peer_id_addr);
+            }
+            ble_gap_security_initiate(event->enc_change.conn_handle);
         }
         return 0;
 
@@ -193,6 +228,7 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
         if (event->passkey.params.action == BLE_SM_IOACT_DISP) {
             struct ble_sm_io pkey = {0};
             pkey.action = BLE_SM_IOACT_DISP;
+            s_passkey = (esp_random() % 1000000);
             pkey.passkey = s_passkey;
             ESP_LOGI(TAG, "=== PASSKEY: %06lu ===", (unsigned long)pkey.passkey);
             ble_sm_inject_io(event->passkey.conn_handle, &pkey);
@@ -214,9 +250,19 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
         return 0;
 
     case BLE_GAP_EVENT_SUBSCRIBE:
-        if (event->subscribe.attr_handle == s_ctx->tx_val_handle + 1) {
-            s_ctx->cccd_subscribed = (event->subscribe.cur_notify != 0);
-            ESP_LOGI(TAG, "TX notify %s", s_ctx->cccd_subscribed ? "on" : "off");
+        /* Accept subscription on any handle to avoid +1 assumption failures.
+         * NimBLE will only deliver notifies when CCCD is actually set.
+         * Also fire the deferred CONNECTED callback here, so that the upper
+         * layer's first ack TX is guaranteed to succeed.
+         * Use async callback to avoid stack overflow in nimble_host task. */
+        if (event->subscribe.cur_notify) {
+            s_ctx->cccd_subscribed = true;
+            ESP_LOGI(TAG, "TX notify on (handle=%d)", event->subscribe.attr_handle);
+            fire_state_cb_async(TRANSPORT_ID_BLE, TRANSPORT_STATE_CONNECTED,
+                                s_ctx->base.cb_ctx);
+        } else if (s_ctx->cccd_subscribed) {
+            s_ctx->cccd_subscribed = false;
+            ESP_LOGI(TAG, "TX notify off");
         }
         return 0;
 
@@ -232,22 +278,46 @@ static int gatts_access_cb(uint16_t conn_handle, uint16_t attr_handle,
 {
     if (!s_ctx) return BLE_ATT_ERR_UNLIKELY;
 
+    ESP_LOGD(TAG, "GATT access: op=%d attr=%d (rx_handle=%d)",
+             ctxt->op, attr_handle, s_ctx->rx_val_handle);
+
     if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR &&
         attr_handle == s_ctx->rx_val_handle) {
-        ESP_LOGI(TAG, "RX %d bytes", ctxt->om->om_len);
-        for (size_t i = 0; i < ctxt->om->om_len; i++) {
-            if (s_ctx->rx_pos < sizeof(s_ctx->rx_buf) - 1)
-                s_ctx->rx_buf[s_ctx->rx_pos++] = ctxt->om->om_data[i];
-            if (ctxt->om->om_data[i] == '\n') {
-                s_ctx->rx_buf[s_ctx->rx_pos] = '\0';
+        uint16_t pkt_len = OS_MBUF_PKTLEN(ctxt->om);
+        ESP_LOGD(TAG, "RX %u bytes", pkt_len);
+
+        /* Copy directly into rx_buf (which is heap-allocated) to avoid putting
+         * a large local array on the nimble_host task stack (stack size ~5 KB). */
+        uint16_t space = (uint16_t)(sizeof(s_ctx->rx_buf) - 1) - s_ctx->rx_pos;
+        if (pkt_len > space) {
+            ESP_LOGW(TAG, "RX overflow: reset buf (pos=%u pkt=%u)", s_ctx->rx_pos, pkt_len);
+            s_ctx->rx_pos = 0;
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        int rc = os_mbuf_copydata(ctxt->om, 0, pkt_len, s_ctx->rx_buf + s_ctx->rx_pos);
+        if (rc != 0) {
+            ESP_LOGW(TAG, "RX copy failed: %d", rc);
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+
+        uint16_t end = s_ctx->rx_pos + pkt_len;
+        for (uint16_t i = s_ctx->rx_pos; i < end; i++) {
+            if (s_ctx->rx_buf[i] == '\n') {
+                s_ctx->rx_buf[i] = '\0';
+                ESP_LOGD(TAG, "RX line: %.*s", (int)i, s_ctx->rx_buf);
                 if (s_ctx->base.rx_cb)
                     s_ctx->base.rx_cb(TRANSPORT_ID_BLE,
                                       (uint8_t *)s_ctx->rx_buf,
-                                      s_ctx->rx_pos,
+                                      i,
                                       s_ctx->base.cb_ctx);
-                s_ctx->rx_pos = 0;
+                uint16_t remaining = end - i - 1;
+                if (remaining > 0)
+                    memmove(s_ctx->rx_buf, s_ctx->rx_buf + i + 1, remaining);
+                end = remaining;
+                i = (uint16_t)-1; /* restart scan; loop will i++ to 0 */
             }
         }
+        s_ctx->rx_pos = end;
         return 0;
     }
     return BLE_ATT_ERR_UNLIKELY;
@@ -300,6 +370,14 @@ static void ble_hs_sync_cb(void)
     if (rc != 0) {
         ESP_LOGE(TAG, "ensure addr failed: %d", rc);
     }
+    /* Sync val handles here — NimBLE assigns them during ble_gatts_start()
+     * which runs inside the host task before sync_cb fires. Copying before
+     * nimble_port_freertos_init would always give 0. */
+    if (s_ctx) {
+        s_ctx->tx_val_handle = s_tx_val_handle;
+        s_ctx->rx_val_handle = s_rx_val_handle;
+        ESP_LOGI(TAG, "GATT handles: tx=%d rx=%d", s_ctx->tx_val_handle, s_ctx->rx_val_handle);
+    }
     ESP_LOGI(TAG, "BLE synced, starting advertising");
     start_advertising();
 }
@@ -334,10 +412,11 @@ static esp_err_t ble_tp_start(transport_t *t)
     ble_hs_cfg.sync_cb = ble_hs_sync_cb;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
 
-    /* Security manager: SC + MITM + Bonding, DisplayOnly */
-    ble_hs_cfg.sm_io_cap = BLE_HS_IO_DISPLAY_ONLY;
+    /* Security manager: keep bonding enabled, but do not require MITM
+     * passkey entry by default to avoid desktop pairing UI deadlocks. */
+    ble_hs_cfg.sm_io_cap = BLE_HS_IO_NO_INPUT_OUTPUT;
     ble_hs_cfg.sm_sc = 1;
-    ble_hs_cfg.sm_mitm = 1;
+    ble_hs_cfg.sm_mitm = 0;
     ble_hs_cfg.sm_bonding = 1;
     ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
@@ -359,10 +438,17 @@ static esp_err_t ble_tp_start(transport_t *t)
     ble_store_config_init();
 
     /* Sync val handles */
-    s_ctx->tx_val_handle = s_tx_val_handle;
-    s_ctx->rx_val_handle = s_rx_val_handle;
+    /* NOTE: handles are assigned by ble_gatts_start() inside the host task,
+     * so syncing here would copy zeros. The actual sync is in ble_hs_sync_cb. */
 
-    /* Step 6: Start host task (triggers sync_cb → advertising) */
+    /* Step 6: Create deferred state callback timer */
+    esp_timer_create_args_t sta = {
+        .callback = deferred_state_cb,
+        .name     = "ble_state",
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&sta, &s_state_timer));
+
+    /* Step 7: Start host task (triggers sync_cb → advertising) */
     nimble_port_freertos_init(ble_host_task);
 
     return ESP_OK;
@@ -370,6 +456,11 @@ static esp_err_t ble_tp_start(transport_t *t)
 
 static esp_err_t ble_tp_stop(transport_t *t)
 {
+    if (s_state_timer) {
+        esp_timer_stop(s_state_timer);
+        esp_timer_delete(s_state_timer);
+        s_state_timer = NULL;
+    }
     nimble_port_stop();
     return ESP_OK;
 }
@@ -378,7 +469,6 @@ static esp_err_t ble_tp_send(transport_t *t, const uint8_t *data, size_t len)
 {
     ble_ctx_t *ctx = (ble_ctx_t *)t;
     if (ctx->state != TRANSPORT_STATE_CONNECTED) return ESP_ERR_INVALID_STATE;
-    if (!ctx->cccd_subscribed) return ESP_ERR_INVALID_STATE;
     if (ctx->tx_val_handle == 0) return ESP_ERR_INVALID_STATE;
 
     size_t chunk = (ctx->mtu > 3) ? ctx->mtu - 3 : 20;
@@ -387,7 +477,10 @@ static esp_err_t ble_tp_send(transport_t *t, const uint8_t *data, size_t len)
     while (offset < len) {
         size_t n = (len - offset < chunk) ? (len - offset) : chunk;
         struct os_mbuf *om = ble_hs_mbuf_from_flat(data + offset, n);
-        int rc = ble_gattc_notify_custom(ctx->conn_handle, ctx->tx_val_handle, om);
+        /* Use ble_gatts_notify_custom (server API) which validates CCCD
+         * internally. ble_gattc_notify_custom is deprecated and skips
+         * the CCCD check, causing unexpected behaviour. */
+        int rc = ble_gatts_notify_custom(ctx->conn_handle, ctx->tx_val_handle, om);
         if (rc != 0) { ESP_LOGE(TAG, "notify failed: %d", rc); return ESP_FAIL; }
         offset += n;
         if (offset < len) vTaskDelay(pdMS_TO_TICKS(4));
@@ -407,14 +500,14 @@ esp_err_t transport_ble_create(transport_t **out, const char *device_name, uint1
 
     if (device_name && device_name[0]) {
         strlcpy(ctx->device_name, device_name, sizeof(ctx->device_name));
+    } else if (CONFIG_TRANSPORT_BLE_DEVICE_NAME[0]) {
+        strlcpy(ctx->device_name, CONFIG_TRANSPORT_BLE_DEVICE_NAME, sizeof(ctx->device_name));
     } else {
         uint8_t mac[6] = {0};
         esp_read_mac(mac, ESP_MAC_BT);
-        /* Short name to fit in 31-byte adv data:
-         * flags(2) + 128bit UUID(18) + name overhead(2) = 22 bytes used.
-         * Only 9 chars max for device name (total must be <= 31). */
+        /* Claude Desktop filters picker results by "Claude" prefix. */
         snprintf(ctx->device_name, sizeof(ctx->device_name),
-                 "Buddy%02X%02X", mac[4], mac[5]);
+                 "Claude-%02X%02X", mac[4], mac[5]);
     }
     ctx->mtu = mtu ? mtu : 517;
     ctx->base.id        = TRANSPORT_ID_BLE;

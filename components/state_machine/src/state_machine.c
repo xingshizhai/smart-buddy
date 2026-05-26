@@ -114,7 +114,10 @@ esp_err_t sm_post_event(sm_handle_t handle, const sm_event_t *evt)
 
     switch (evt->type) {
     case SM_EVT_TRANSPORT_DISCONNECTED:
-        enter_state(ctx, SM_STATE_SLEEP, 0);
+        /* BLE may reconnect quickly; don't blank the screen immediately. */
+        if (s != SM_STATE_IDLE) {
+            enter_state(ctx, SM_STATE_IDLE, 0);
+        }
         break;
 
     case SM_EVT_FACE_DOWN:

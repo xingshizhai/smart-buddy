@@ -4,13 +4,17 @@
 #include "state_machine.h"
 
 typedef enum {
-    UI_SCREEN_BOOT     = 0,
+    UI_SCREEN_BOOT       = 0,
     UI_SCREEN_MAIN,
     UI_SCREEN_APPROVAL,
     UI_SCREEN_STATUS,
     UI_SCREEN_SETTINGS,
     UI_SCREEN_DEBUG,
     UI_SCREEN_BLE_DEBUG,
+    UI_SCREEN_STATS,     /* Pet stats: mood, energy, level, tokens */
+    UI_SCREEN_INFO,      /* Info pages: About, Buttons, Claude, Device, BT, Credits */
+    UI_SCREEN_MENU,      /* Menu overlay */
+    UI_SCREEN_CLOCK,     /* Clock face */
     UI_SCREEN_MAX,
 } ui_screen_id_t;
 
@@ -43,3 +47,19 @@ void ui_screen_approval_resolve(bool approved);
 void ui_approval_handle_key(bool approved);  /* A=approve, B=deny from physical buttons */
 void ui_screen_status_refresh(void);
 void ui_statusbar_update(void);
+
+/* Pet stats screen */
+void ui_screen_stats_refresh(void);
+void ui_screen_stats_set_energy(uint8_t pct);
+void ui_screen_stats_set_fed(uint8_t pct);
+
+/* Info screen */
+void ui_screen_info_next_page(void);
+void ui_screen_info_reset(void);
+
+/* Clock screen */
+void ui_screen_clock_start(void);
+void ui_screen_clock_stop(void);
+
+/* Menu screen */
+void ui_screen_menu_set_selection(const char *label);

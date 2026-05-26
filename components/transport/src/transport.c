@@ -82,7 +82,7 @@ esp_err_t transport_send_all(const uint8_t *data, size_t len)
         transport_state_t st = s_transports[i]->get_state(s_transports[i]);
         if (st == TRANSPORT_STATE_CONNECTED) {
             esp_err_t r = s_transports[i]->send(s_transports[i], data, len);
-            ESP_LOGI(TAG, "TX [id=%d state=%d] r=%d: %.*s",
+            ESP_LOGD(TAG, "TX [id=%d state=%d] r=%d: %.*s",
                      i, st, r, (int)(len < 128 ? len : 128), (const char *)data);
         }
     }

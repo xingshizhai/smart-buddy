@@ -15,7 +15,7 @@ menu "Smart-Buddy Configuration"
 
         config TRANSPORT_WS_ENABLED
             bool "Enable Wi-Fi WebSocket transport"
-            default y
+            default n
 
         config TRANSPORT_WS_MODE_CLIENT
             bool "WebSocket client mode (connect to server)"
@@ -34,7 +34,7 @@ menu "Smart-Buddy Configuration"
 
         config TRANSPORT_USB_ENABLED
             bool "Enable USB CDC-ACM serial transport"
-            default y
+            default n
 
     endmenu
 

@@ -12,6 +12,10 @@ typedef enum {
     AGENT_EVT_BUTTON,
     AGENT_EVT_IMU_GESTURE,
     AGENT_EVT_HEARTBEAT_ACK,
+    AGENT_EVT_AUDIO_RECORD_START,
+    AGENT_EVT_AUDIO_RECORD_STOP,
+    AGENT_EVT_TURN_COMPLETE,
+    AGENT_EVT_CMD,
     AGENT_EVT_MAX,
 } agent_event_type_t;
 
@@ -29,6 +33,10 @@ typedef struct {
             uint32_t waiting;
             uint32_t tokens_total;
             uint32_t tokens_today;
+            bool     completed;       /* doc["completed"] — true after each assistant turn */
+            char     msg[48];
+            char     entries[8][92];
+            uint8_t  n_entries;
         } session;
         struct {
             char id[64];
@@ -53,6 +61,10 @@ typedef struct {
         struct {
             imu_gesture_t gesture;
         } imu;
+            struct {
+                char name[32];
+                char value[128];
+            } cmd;
     } data;
     int64_t timestamp_us;
 } agent_event_t;

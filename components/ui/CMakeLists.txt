@@ -1,8 +1,14 @@
 idf_component_register(
     SRCS
+        "src/ui_theme.c"
         "src/ui_manager.c"
         "src/ui_screen_debug.c"
         "src/ui_screen_ble_debug.c"
+        "src/ui_screen_stats.c"
+        "src/ui_screen_info.c"
+        "src/ui_screen_menu.c"
+        "src/ui_screen_clock.c"
+        "src/ui_button_router.c"
         "src/persona_data.c"
         "src/persona_driver.c"
     INCLUDE_DIRS "include"

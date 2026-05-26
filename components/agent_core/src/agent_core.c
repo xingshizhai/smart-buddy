@@ -51,11 +51,16 @@ static void on_transport_rx(transport_id_t id, const uint8_t *data, size_t len, 
     proto_t *proto = proto_get_active();
     if (!proto) return;
 
-    agent_event_t events[8];
+    /* Heap-allocate the event buffer: agent_event_t is ~816 bytes, so
+     * 8 events × 816 B = ~6.5 KB on the NimBLE host task stack (4 KB default)
+     * caused a stack overflow and Double Exception in cJSON's parse_string. */
+    agent_event_t *events = malloc(sizeof(agent_event_t) * 8);
+    if (!events) return;
     size_t n = 0;
     proto->decode(proto, data, len, events, 8, &n);
     for (size_t i = 0; i < n; i++)
         agent_core_post_event(&events[i]);
+    free(events);
 }
 
 static void on_transport_state(transport_id_t id, transport_state_t state, void *ctx)

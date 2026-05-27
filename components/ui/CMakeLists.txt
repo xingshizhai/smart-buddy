@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "src/ui_fonts.c"
+        "src/lv_font_noto_sans_sc_14.c"
         "src/ui_theme.c"
         "src/ui_manager.c"
         "src/ui_screen_debug.c"

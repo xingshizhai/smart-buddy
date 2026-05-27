@@ -238,7 +238,7 @@ static lv_obj_t *screen_main_create(void)
     lv_label_set_text(s_main_title_label, "Ready");
     lv_obj_set_style_text_color(s_main_title_label, p->text_muted, 0);
     lv_obj_set_style_text_font(s_main_title_label, &lv_font_montserrat_14, 0);
-    lv_obj_set_width(s_main_title_label, 100);
+    lv_obj_set_width(s_main_title_label, 75);
     lv_label_set_long_mode(s_main_title_label, LV_LABEL_LONG_DOT);
     lv_obj_align(s_main_title_label, LV_ALIGN_LEFT_MID, 12, 0);
 
@@ -729,8 +729,13 @@ void ui_screen_main_set_token_count(uint32_t tokens)
 {
     if (!lvgl_port_lock(100)) return;
     if (s_main_title_label) {
-        char buf[48];
-        snprintf(buf, sizeof(buf), "Tokens %lu", (unsigned long)tokens);
+        char buf[24];
+        if (tokens >= 100000)
+            snprintf(buf, sizeof(buf), "T:%luk", (unsigned long)(tokens / 1000));
+        else if (tokens >= 10000)
+            snprintf(buf, sizeof(buf), "T:%.1fk", (float)tokens / 1000.0f);
+        else
+            snprintf(buf, sizeof(buf), "T:%lu", (unsigned long)tokens);
         lv_label_set_text(s_main_title_label, buf);
     }
     lvgl_port_unlock();

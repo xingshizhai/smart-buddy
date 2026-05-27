@@ -731,11 +731,11 @@ void ui_screen_main_set_token_count(uint32_t tokens)
     if (s_main_title_label) {
         char buf[24];
         if (tokens >= 100000)
-            snprintf(buf, sizeof(buf), "T:%luk", (unsigned long)(tokens / 1000));
+            snprintf(buf, sizeof(buf), "T: %luk", (unsigned long)(tokens / 1000));
         else if (tokens >= 10000)
-            snprintf(buf, sizeof(buf), "T:%.1fk", (float)tokens / 1000.0f);
+            snprintf(buf, sizeof(buf), "T: %.1fk", (float)tokens / 1000.0f);
         else
-            snprintf(buf, sizeof(buf), "T:%lu", (unsigned long)tokens);
+            snprintf(buf, sizeof(buf), "T: %lu", (unsigned long)tokens);
         lv_label_set_text(s_main_title_label, buf);
     }
     lvgl_port_unlock();

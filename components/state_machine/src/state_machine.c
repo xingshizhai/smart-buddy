@@ -132,21 +132,29 @@ esp_err_t sm_post_event(sm_handle_t handle, const sm_event_t *evt)
         break;
 
     case SM_EVT_SESSION_STARTED:
-        /* Also exit ATTENTION when a new session fires — prompt vanished externally */
-        if (s == SM_STATE_IDLE || s == SM_STATE_ATTENTION)
+        /* Only enter BUSY from IDLE — do NOT exit ATTENTION.
+         * Session updates keep firing during approval; ignoring them here
+         * prevents heartbeat packets from dismissing the approval screen. */
+        if (s == SM_STATE_IDLE)
             enter_state(ctx, SM_STATE_BUSY, 0);
         break;
 
     case SM_EVT_SESSION_ENDED:
-        /* Also exit ATTENTION when session ends — prompt resolved or timed out */
-        if (s == SM_STATE_BUSY || s == SM_STATE_ATTENTION)
+        /* Only exit BUSY — do NOT exit ATTENTION.
+         * The approval screen must stay until the user acts or the explicit
+         * approval timeout fires; a session-ended signal during approval is
+         * a spurious heartbeat artefact, not a resolved permission prompt. */
+        if (s == SM_STATE_BUSY)
             enter_state(ctx, SM_STATE_IDLE, 0);
         break;
 
     case SM_EVT_APPROVAL_REQUEST:
         if (s != SM_STATE_ATTENTION && s != SM_STATE_SLEEP) {
             ctx->attention_enter_us = esp_timer_get_time();
-            enter_state(ctx, SM_STATE_ATTENTION, 0);
+            /* Start explicit timeout; CONFIG_UI_APPROVAL_TIMEOUT_S was defined
+             * but previously unused (timer_ms was 0). */
+            enter_state(ctx, SM_STATE_ATTENTION,
+                        (uint32_t)CONFIG_UI_APPROVAL_TIMEOUT_S * 1000);
         }
         break;
 
@@ -173,6 +181,9 @@ esp_err_t sm_post_event(sm_handle_t handle, const sm_event_t *evt)
 
     case SM_EVT_TIMER_EXPIRED:
         if (s == SM_STATE_CELEBRATE || s == SM_STATE_DIZZY || s == SM_STATE_HEART)
+            enter_state(ctx, ctx->prev_state, 0);
+        else if (s == SM_STATE_ATTENTION)
+            /* Approval timed out — auto-reject and return to previous state */
             enter_state(ctx, ctx->prev_state, 0);
         break;
 

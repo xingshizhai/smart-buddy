@@ -4,6 +4,13 @@ An ESP32-S3-BOX-3 firmware that turns your device into a physical companion for 
 
 Inspired by [claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy). Supports three protocol modes selectable in `menuconfig`: **Claude Buddy** (drop-in compatible with claude-desktop-buddy), **OpenClaw**, and **Hermes**.
 
+**Features at a glance:**
+- Real-time agent status display (IDLE / BUSY / ATTENTION / CELEBRATE / DIZZY)
+- One-tap tool-use approval with 30-second auto-reject timeout
+- Full Chinese character display — GB2312 Level 1 (~3800 simplified characters) via Noto Sans SC 14 px
+- BLE (NUS), USB CDC-ACM, and WebSocket transports — all active simultaneously
+- IMU gestures: shake → dizzy animation, face-down → screen sleep
+
 [中文文档](README_zh.md)
 
 ---
@@ -66,7 +73,7 @@ Key settings under **Smart-Buddy Configuration**:
 | Setting | Path | Default |
 |---------|------|---------|
 | Protocol mode | Protocol Adapters → Buddy Protocol Mode | Claude Buddy |
-| BLE device name | Transport Layer → BLE Advertised Name | SmartBuddy |
+| BLE device name | Transport Layer → BLE Advertised Name | _(auto: `Claude-XXYY` from MAC)_ |
 | WebSocket server URL | Transport Layer → Default WebSocket server URL | ws://192.168.1.100:8080/buddy |
 | Wi-Fi SSID | Wi-Fi → Default Wi-Fi SSID | _(empty)_ |
 | Wi-Fi password | Wi-Fi → Default Wi-Fi Password | _(empty)_ |
@@ -117,7 +124,7 @@ cat /dev/ttyACM0
 
 ### BLE
 
-The device advertises as **SmartBuddy** using the Nordic UART Service (NUS). Connect with any BLE terminal app (nRF Connect, LightBlue, etc.) and write JSON frames to the RX characteristic.
+The device advertises as **Claude-XXYY** (last two bytes of the BT MAC address, e.g. `Claude-3A7F`) using the Nordic UART Service (NUS). Connect with any BLE terminal app (nRF Connect, LightBlue, etc.) and write JSON frames to the RX characteristic. You can override the name in menuconfig → **Transport Layer → BLE Advertised Name**.
 
 ### WebSocket
 
@@ -173,6 +180,8 @@ Field names are configurable at compile time. See [docs/protocol.md](docs/protoc
 | Touchscreen — **Approve** | Grant the pending tool-use request |
 | Touchscreen — **Deny** | Deny the pending tool-use request |
 
+> **Approval timeout:** If neither button is tapped within 30 seconds the request is automatically rejected and the device returns to its previous state. The timeout is configurable via `CONFIG_UI_APPROVAL_TIMEOUT_S` in menuconfig.
+
 **Gestures (IMU):**
 
 | Gesture | Effect |
@@ -190,9 +199,11 @@ SLEEP  ──connect──►  IDLE  ──agent working──►  BUSY
                       ▲                           │
                       │                 tool-use request
                       │                           ▼
-                   resolved ◄──────────────  ATTENTION
-                                              (touch to approve/deny)
+          resolved / ◄──────────────────  ATTENTION
+          30 s timeout                    (touch to approve/deny)
 ```
+
+ATTENTION exits only when: the user taps **Approve** or **Deny**, the 30-second timeout elapses (auto-reject), or the transport disconnects. Heartbeat packets from the agent do **not** dismiss the screen.
 
 Additional transient states: **CELEBRATE** (token milestone), **DIZZY** (shake), **HEART** (fast approval).
 

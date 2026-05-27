@@ -4,6 +4,13 @@
 
 灵感来自 [claude-desktop-buddy](https://github.com/anthropics/claude-desktop-buddy)。支持三种协议模式，可在 `menuconfig` 中选择：**Claude Buddy**（与 claude-desktop-buddy 直接兼容）、**OpenClaw** 和 **Hermes**。
 
+**核心功能：**
+- 实时 Agent 状态显示（IDLE 空闲 / BUSY 忙碌 / ATTENTION 等待审批 / CELEBRATE 庆祝 / DIZZY 晕眩）
+- 一键工具调用审批，30 秒无操作自动拒绝
+- 完整中文显示支持 —— 内置 GB2312 一级字库（~3800 个常用简体汉字），采用 Noto Sans SC 14 px 字体
+- BLE（NUS）、USB CDC-ACM、WebSocket 三路传输同时工作
+- IMU 手势：摇晃 → 晕眩动画，屏幕朝下 → 熄屏
+
 [English](README.md)
 
 ---
@@ -66,7 +73,7 @@ idf.py menuconfig
 | 配置项 | 路径 | 默认值 |
 |--------|------|--------|
 | 协议模式 | Protocol Adapters → Buddy Protocol Mode | Claude Buddy |
-| BLE 设备名 | Transport Layer → BLE Advertised Name | SmartBuddy |
+| BLE 设备名 | Transport Layer → BLE Advertised Name | （自动生成：`Claude-XXYY`，取自 MAC 地址） |
 | WebSocket 服务器地址 | Transport Layer → Default WebSocket server URL | ws://192.168.1.100:8080/buddy |
 | Wi-Fi SSID | Wi-Fi → Default Wi-Fi SSID | （空） |
 | Wi-Fi 密码 | Wi-Fi → Default Wi-Fi Password | （空） |
@@ -117,7 +124,7 @@ cat /dev/ttyACM0
 
 ### BLE
 
-设备以 **SmartBuddy** 为名广播蓝牙，采用 Nordic UART Service（NUS）。使用任意 BLE 串口 App（nRF Connect、LightBlue 等）连接后，向 RX 特征值写入 JSON 帧即可。
+设备以 **Claude-XXYY** 为名广播蓝牙（XXYY 取自蓝牙 MAC 地址后两字节，例如 `Claude-3A7F`），采用 Nordic UART Service（NUS）。使用任意 BLE 串口 App（nRF Connect、LightBlue 等）连接后，向 RX 特征值写入 JSON 帧即可。如需自定义名称，可在 menuconfig → **Transport Layer → BLE Advertised Name** 中设置。
 
 ### WebSocket
 
@@ -173,6 +180,8 @@ cat /dev/ttyACM0
 | 触摸 **批准** | 授权当前待处理的工具调用请求 |
 | 触摸 **拒绝** | 拒绝当前待处理的工具调用请求 |
 
+> **审批超时：** 30 秒内未操作则自动拒绝并返回上一状态。可通过 menuconfig 中的 `CONFIG_UI_APPROVAL_TIMEOUT_S` 调整超时时长。
+
 **IMU 手势：**
 
 | 手势 | 效果 |
@@ -190,9 +199,11 @@ SLEEP（休眠）──连接──► IDLE（空闲）──Agent 工作──�
                           ▲                               │
                           │                       工具调用请求
                           │                               ▼
-                       已处理 ◄────────────────── ATTENTION（等待审批）
-                                                  （触摸批准/拒绝）
+              已处理/30 秒超时 ◄──────────── ATTENTION（等待审批）
+                                              （触摸批准/拒绝）
 ```
+
+ATTENTION 状态只在以下三种情况下退出：用户点击**批准**或**拒绝**、30 秒超时自动拒绝、或传输层断开。Agent 发来的心跳包**不会**打断审批界面。
 
 额外的短暂状态：**CELEBRATE**（Token 里程碑）、**DIZZY**（摇晃）、**HEART**（快速批准）。
 

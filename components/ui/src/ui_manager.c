@@ -275,6 +275,11 @@ static lv_obj_t *screen_boot_create(void)
     return scr;
 }
 
+static void main_settings_btn_cb(lv_event_t *e)
+{
+    ui_manager_push(UI_SCREEN_SETTINGS, UI_ANIM_SLIDE_LEFT);
+}
+
 static lv_obj_t *screen_main_create(void)
 {
     const ui_palette_t *p = ui_theme_palette();
@@ -299,6 +304,16 @@ static lv_obj_t *screen_main_create(void)
     lv_obj_set_style_text_color(s_ble_indicator, p->text_muted, 0);
     lv_obj_set_style_text_font(s_ble_indicator, &lv_font_montserrat_14, 0);
     lv_obj_align(s_ble_indicator, LV_ALIGN_RIGHT_MID, -10, 0);
+
+    /* Settings gear icon — left of BLE, tap to open settings */
+    lv_obj_t *gear = lv_label_create(bar);
+    lv_label_set_text(gear, LV_SYMBOL_SETTINGS);
+    lv_obj_set_style_text_color(gear, p->text_muted, 0);
+    lv_obj_set_style_text_font(gear, &lv_font_montserrat_14, 0);
+    lv_obj_align(gear, LV_ALIGN_RIGHT_MID, -30, 0);
+    lv_obj_add_flag(gear, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(gear, 8);
+    lv_obj_add_event_cb(gear, main_settings_btn_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *hero = lv_obj_create(scr);
     lv_obj_set_size(hero, 304, 132);

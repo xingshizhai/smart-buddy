@@ -1,5 +1,6 @@
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
@@ -14,6 +15,7 @@
 #include "agent_core.h"
 #include "agent_stats.h"
 #include "transport/transport.h"
+#include "audio_manager.h"
 
 #define TAG "UI"
 
@@ -28,6 +30,55 @@
 static ui_screen_id_t s_stack[SCREEN_STACK_DEPTH];
 static int            s_stack_top = -1;
 static lv_obj_t      *s_screens[UI_SCREEN_MAX] = {0};
+
+/* --- Attention alert tone ------------------------------------------------ */
+#define ALERT_SR           16000
+#define ALERT_BEEP_MS      180
+#define ALERT_GAP_MS       120
+#define ALERT_FADE_MS      20
+#define ALERT_BEEP_SAMPLES (ALERT_SR * ALERT_BEEP_MS  / 1000)   /* 2880 */
+#define ALERT_GAP_SAMPLES  (ALERT_SR * ALERT_GAP_MS   / 1000)   /* 1920 */
+#define ALERT_FADE_SAMPLES (ALERT_SR * ALERT_FADE_MS  / 1000)   /*  320 */
+#define ALERT_TOTAL        (ALERT_BEEP_SAMPLES * 2 + ALERT_GAP_SAMPLES)
+#define ALERT_AMPLITUDE    22000
+
+static int16_t *s_alert_buf = NULL;
+
+static void build_alert_tone(void)
+{
+    if (s_alert_buf) return;
+    s_alert_buf = malloc(ALERT_TOTAL * sizeof(int16_t));
+    if (!s_alert_buf) return;
+
+    /* Two ascending beeps: 800 Hz then 1050 Hz, with short fade to avoid clicks */
+    static const float freqs[2] = {800.0f, 1050.0f};
+    for (int b = 0; b < 2; b++) {
+        int off = b * (ALERT_BEEP_SAMPLES + ALERT_GAP_SAMPLES);
+        for (int i = 0; i < ALERT_BEEP_SAMPLES; i++) {
+            float env = 1.0f;
+            if (i < ALERT_FADE_SAMPLES)
+                env = (float)i / ALERT_FADE_SAMPLES;
+            else if (i > ALERT_BEEP_SAMPLES - ALERT_FADE_SAMPLES)
+                env = (float)(ALERT_BEEP_SAMPLES - i) / ALERT_FADE_SAMPLES;
+            float t = (float)i / ALERT_SR;
+            s_alert_buf[off + i] = (int16_t)(ALERT_AMPLITUDE * env *
+                                             sinf(2.0f * (float)M_PI * freqs[b] * t));
+        }
+        /* Gap (silence) between the two beeps */
+        if (b == 0)
+            memset(&s_alert_buf[ALERT_BEEP_SAMPLES], 0,
+                   ALERT_GAP_SAMPLES * sizeof(int16_t));
+    }
+}
+
+static void play_attention_tone(void)
+{
+    build_alert_tone();
+    if (!s_alert_buf) return;
+    audio_manager_set_volume(70);
+    audio_manager_play_raw(s_alert_buf, ALERT_TOTAL);
+}
+/* ------------------------------------------------------------------------- */
 
 /* Forward declarations for screen create functions */
 static lv_obj_t *screen_boot_create(void);
@@ -639,6 +690,7 @@ void ui_manager_on_state_change(sm_state_t new_state, sm_state_t old_state, void
         break;
 
     case SM_STATE_ATTENTION:
+        play_attention_tone();
         ui_manager_push(UI_SCREEN_APPROVAL, UI_ANIM_SLIDE_LEFT);
         /* Keep screen on, pause inactivity timer during approval */
         if (lvgl_port_lock(100)) {

@@ -24,4 +24,5 @@ idf_component_register(
         lvgl__lvgl  # Public headers expose lv_font_t, lv_color_t, lv_obj_t
     PRIV_REQUIRES
         espressif__esp_lvgl_port
+        esp_netif
 )

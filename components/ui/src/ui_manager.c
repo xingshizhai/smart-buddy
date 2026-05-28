@@ -16,6 +16,7 @@
 #include "agent_stats.h"
 #include "transport/transport.h"
 #include "audio_manager.h"
+#include "esp_netif.h"
 
 #define TAG "UI"
 
@@ -132,6 +133,11 @@ static lv_obj_t *s_status_sessions   = NULL;
 static lv_obj_t *s_status_approvals  = NULL;
 static lv_obj_t *s_status_heap       = NULL;
 static lv_obj_t *s_status_transport  = NULL;
+
+/* Settings screen status panel live labels */
+static lv_obj_t *s_set_ble_val  = NULL;
+static lv_obj_t *s_set_wifi_val = NULL;
+static lv_obj_t *s_set_usb_val  = NULL;
 
 static lv_timer_t *s_approval_timer  = NULL;
 static lv_timer_t *s_screenoff_timer = NULL;
@@ -508,6 +514,54 @@ static void settings_back_btn_cb(lv_event_t *e)
     ui_manager_pop(UI_ANIM_SLIDE_RIGHT);
 }
 
+static void settings_refresh_status(void)
+{
+    const ui_palette_t *p = ui_theme_palette();
+    if (!lvgl_port_lock(100)) return;
+
+    /* BLE */
+    if (s_set_ble_val) {
+        transport_state_t st = transport_get_state(TRANSPORT_ID_BLE);
+        bool conn = (st == TRANSPORT_STATE_CONNECTED);
+        const char *nm = transport_ble_get_device_name();
+        char buf[48];
+        snprintf(buf, sizeof(buf), conn ? "%s  Connected" : "%s  --",
+                 nm ? nm : "?");
+        lv_label_set_text(s_set_ble_val, buf);
+        lv_obj_set_style_text_color(s_set_ble_val,
+                                    conn ? p->success : p->text_muted, 0);
+    }
+
+    /* WiFi — show IP address if available, otherwise "--" */
+    if (s_set_wifi_val) {
+        char buf[24] = "--";
+        esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        if (netif) {
+            esp_netif_ip_info_t ip = {};
+            if (esp_netif_get_ip_info(netif, &ip) == ESP_OK && ip.ip.addr) {
+                snprintf(buf, sizeof(buf), IPSTR, IP2STR(&ip.ip));
+            } else {
+                strlcpy(buf, "No IP", sizeof(buf));
+            }
+        }
+        bool conn = (buf[0] != '-');
+        lv_label_set_text(s_set_wifi_val, buf);
+        lv_obj_set_style_text_color(s_set_wifi_val,
+                                    conn ? p->success : p->text_muted, 0);
+    }
+
+    /* USB CDC */
+    if (s_set_usb_val) {
+        transport_state_t st = transport_get_state(TRANSPORT_ID_USB);
+        bool conn = (st == TRANSPORT_STATE_CONNECTED);
+        lv_label_set_text(s_set_usb_val, conn ? "Active" : "--");
+        lv_obj_set_style_text_color(s_set_usb_val,
+                                    conn ? p->success : p->text_muted, 0);
+    }
+
+    lvgl_port_unlock();
+}
+
 static lv_obj_t *screen_settings_create(void)
 {
     const ui_palette_t *p = ui_theme_palette();
@@ -518,16 +572,69 @@ static lv_obj_t *screen_settings_create(void)
     lv_obj_t *bar = ui_theme_create_title_bar(scr, "Settings");
     ui_theme_create_back_button(bar, settings_back_btn_cb);
 
-    /* Menu list */
+    /* ── Connection status panel ──────────────────────────────────────
+     * Layout (320×240 screen, title bar = 28px):
+     *   Status panel : y=34, h=72  (3 rows × 20px + 12px padding)
+     *   Nav list     : y=112, h=122 (scrollable)
+     * ---------------------------------------------------------------- */
+    lv_obj_t *sp = lv_obj_create(scr);
+    lv_obj_set_size(sp, 304, 72);
+    lv_obj_align(sp, LV_ALIGN_TOP_MID, 0, 34);
+    ui_theme_style_panel(sp);
+    lv_obj_set_style_pad_all(sp, 6, 0);
+    lv_obj_clear_flag(sp, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* BLE row */
+    lv_obj_t *ble_lbl = lv_label_create(sp);
+    lv_label_set_text(ble_lbl, LV_SYMBOL_BLUETOOTH " BLE");
+    lv_obj_set_style_text_color(ble_lbl, p->text_muted, 0);
+    lv_obj_set_style_text_font(ble_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_align(ble_lbl, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    s_set_ble_val = lv_label_create(sp);
+    lv_label_set_text(s_set_ble_val, "--");
+    lv_obj_set_style_text_color(s_set_ble_val, p->text_muted, 0);
+    lv_obj_set_style_text_font(s_set_ble_val, &lv_font_montserrat_14, 0);
+    lv_obj_set_width(s_set_ble_val, 200);
+    lv_label_set_long_mode(s_set_ble_val, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_set_ble_val, LV_ALIGN_TOP_LEFT, 52, 0);
+
+    /* WiFi row */
+    lv_obj_t *wifi_lbl = lv_label_create(sp);
+    lv_label_set_text(wifi_lbl, LV_SYMBOL_WIFI " WiFi");
+    lv_obj_set_style_text_color(wifi_lbl, p->text_muted, 0);
+    lv_obj_set_style_text_font(wifi_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_align(wifi_lbl, LV_ALIGN_TOP_LEFT, 0, 20);
+
+    s_set_wifi_val = lv_label_create(sp);
+    lv_label_set_text(s_set_wifi_val, "--");
+    lv_obj_set_style_text_color(s_set_wifi_val, p->text_muted, 0);
+    lv_obj_set_style_text_font(s_set_wifi_val, &lv_font_montserrat_14, 0);
+    lv_obj_align(s_set_wifi_val, LV_ALIGN_TOP_LEFT, 52, 20);
+
+    /* USB row */
+    lv_obj_t *usb_lbl = lv_label_create(sp);
+    lv_label_set_text(usb_lbl, LV_SYMBOL_USB " USB");
+    lv_obj_set_style_text_color(usb_lbl, p->text_muted, 0);
+    lv_obj_set_style_text_font(usb_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_align(usb_lbl, LV_ALIGN_TOP_LEFT, 0, 40);
+
+    s_set_usb_val = lv_label_create(sp);
+    lv_label_set_text(s_set_usb_val, "--");
+    lv_obj_set_style_text_color(s_set_usb_val, p->text_muted, 0);
+    lv_obj_set_style_text_font(s_set_usb_val, &lv_font_montserrat_14, 0);
+    lv_obj_align(s_set_usb_val, LV_ALIGN_TOP_LEFT, 52, 40);
+
+    /* ── Navigation list ────────────────────────────────────────────── */
     lv_obj_t *list = lv_list_create(scr);
-    lv_obj_set_size(list, 304, 188);
-    lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 42);
+    lv_obj_set_size(list, 304, 122);
+    lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 112);
     lv_obj_set_style_bg_color(list, p->panel, 0);
     lv_obj_set_style_bg_opa(list, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(list, p->border, 0);
     lv_obj_set_style_border_width(list, 1, 0);
-    lv_obj_set_style_pad_row(list, 6, 0);
-    lv_obj_set_style_pad_all(list, 8, 0);
+    lv_obj_set_style_pad_row(list, 4, 0);
+    lv_obj_set_style_pad_all(list, 6, 0);
     lv_obj_set_style_radius(list, 10, 0);
 
     lv_obj_t *btn_st = lv_list_add_btn(list, LV_SYMBOL_LIST, "Device Status");
@@ -535,20 +642,20 @@ static lv_obj_t *screen_settings_create(void)
     lv_obj_set_style_text_color(btn_st, p->text, 0);
     lv_obj_add_event_cb(btn_st, settings_status_btn_cb, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *btn_info = lv_list_add_btn(list, LV_SYMBOL_EDIT, "Info");
-    ui_theme_style_panel_alt(btn_info);
-    lv_obj_set_style_text_color(btn_info, p->text, 0);
-    lv_obj_add_event_cb(btn_info, settings_info_btn_cb, LV_EVENT_CLICKED, NULL);
-
     lv_obj_t *btn_ble = lv_list_add_btn(list, LV_SYMBOL_BLUETOOTH, "BLE Debug");
     ui_theme_style_panel_alt(btn_ble);
     lv_obj_set_style_text_color(btn_ble, p->text, 0);
     lv_obj_add_event_cb(btn_ble, settings_ble_debug_btn_cb, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *btn = lv_list_add_btn(list, LV_SYMBOL_AUDIO, "Audio Debug");
-    ui_theme_style_panel_alt(btn);
-    lv_obj_set_style_text_color(btn, p->text, 0);
-    lv_obj_add_event_cb(btn, settings_debug_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *btn_audio = lv_list_add_btn(list, LV_SYMBOL_AUDIO, "Audio Debug");
+    ui_theme_style_panel_alt(btn_audio);
+    lv_obj_set_style_text_color(btn_audio, p->text, 0);
+    lv_obj_add_event_cb(btn_audio, settings_debug_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *btn_info = lv_list_add_btn(list, LV_SYMBOL_EDIT, "Info");
+    ui_theme_style_panel_alt(btn_info);
+    lv_obj_set_style_text_color(btn_info, p->text, 0);
+    lv_obj_add_event_cb(btn_info, settings_info_btn_cb, LV_EVENT_CLICKED, NULL);
 
     return scr;
 }
@@ -580,6 +687,7 @@ static void notify_screen_lifecycle(ui_screen_id_t leaving, ui_screen_id_t enter
     if (entering == UI_SCREEN_CLOCK)      ui_screen_clock_start();
     if (leaving == UI_SCREEN_CLOCK)       ui_screen_clock_stop();
     if (entering == UI_SCREEN_STATS)      ui_screen_stats_refresh();
+    if (entering == UI_SCREEN_SETTINGS)   settings_refresh_status();
 
     /* Wake screen from screen-off on any navigation */
     if (s_screen_dimmed) {

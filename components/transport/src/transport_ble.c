@@ -241,10 +241,13 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
             ESP_LOGI(TAG, "connected conn_handle=%d", s_ctx->conn_handle);
             /* Do NOT fire state_cb(CONNECTED) yet — wait for CCCD subscription
              * so the first TX (heartbeat ack) succeeds immediately. */
-            /* Initiate security immediately so Desktop doesn't deadlock waiting
-             * for us to start the pairing flow. ENC_CHANGE failure is handled
-             * below: stale LTK is cleared and fresh pairing is retried. */
-            ble_gap_security_initiate(event->connect.conn_handle);
+            /* Let macOS (the Central) initiate security.  When we call
+             * ble_gap_security_initiate() simultaneously with macOS sending
+             * LL_START_ENC (LTK encryption), two security procedures collide
+             * and macOS terminates with BLE_ERR_REM_USER_CONN_TERM (0x13).
+             * macOS will initiate encryption by itself after connection.
+             * If macOS doesn't initiate within a reasonable time, we rely on
+             * the passkey / just-works flow triggered by its pairing request. */
         } else {
             /* Connection failed.
              *
@@ -281,7 +284,11 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
         s_ctx->secure = false;
         s_ctx->cccd_subscribed = false;
         s_passkey = 0;
-        s_directed_adv_done = false;   /* allow directed phase for next reconnect */
+        /* Only reset directed-adv flag if a *successful* session just ended.
+         * s_directed_adv_done is cleared in the successful CONNECT handler.
+         * If we clear it here too, every failed connect (rc=19) + disconnect
+         * causes directed adv to restart — creating an infinite loop that
+         * prevents macOS from ever completing security during undirected adv. */
         /* Use deferred callback (same as CONNECT) to keep NimBLE host task
          * stack clear of agent_core → state_machine call chains. */
         fire_state_cb_async(TRANSPORT_ID_BLE, TRANSPORT_STATE_DISCONNECTED,

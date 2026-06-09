@@ -155,6 +155,7 @@ static void start_advertising(void)
 
     rc = ble_gap_adv_start(own_addr_type, NULL, BLE_HS_FOREVER,
                            &adv_params, ble_gap_event_cb, NULL);
+    if (rc == BLE_HS_EALREADY) return;  /* already advertising, no-op */
     if (rc != 0) { ESP_LOGE(TAG, "adv start: %d", rc); return; }
     ESP_LOGI(TAG, "advertising as '%s'", name ? name : "unknown");
 }
@@ -181,7 +182,17 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
              * below: stale LTK is cleared and fresh pairing is retried. */
             ble_gap_security_initiate(event->connect.conn_handle);
         } else {
-            ESP_LOGE(TAG, "connect failed rc=%d", event->connect.status);
+            /* rc=19 (BLE_HS_ENOENT) = LL key-not-found: Desktop has a stale
+             * LTK that the device no longer recognises (e.g. after NVS erase).
+             * Wipe all stored bonds so the next attempt forces fresh pairing. */
+            /* rc=19 = BLE_HS_ENOENT: Desktop sent a stale LTK that the device
+             * no longer has (NVS cleared after reflash). Log clearly so the
+             * user knows to "Forget Device" in Claude Desktop and re-pair. */
+            if (event->connect.status == BLE_HS_ENOENT) {
+                ESP_LOGW(TAG, "connect failed rc=19: stale LTK — forget this device in Claude Desktop and reconnect to re-pair");
+            } else {
+                ESP_LOGE(TAG, "connect failed rc=%d", event->connect.status);
+            }
             start_advertising();
         }
         return 0;

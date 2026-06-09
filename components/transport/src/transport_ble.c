@@ -185,10 +185,12 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
             /* Connection failed — peer likely has a stale LTK (e.g. after
              * reflash wiped NVS). Clear all stored bonds so the next attempt
              * forces fresh Just-Works pairing instead of looping on auth failures.
-             * DISCONNECT event will follow and restart advertising. */
-            ESP_LOGW(TAG, "connect failed rc=%d — clearing all bonds for fresh pairing",
+             * NOTE: BLE_GAP_EVENT_CONNECT failure does NOT produce a subsequent
+             * DISCONNECT event, so we must restart advertising here ourselves. */
+            ESP_LOGW(TAG, "connect failed rc=%d — clearing all bonds, restarting adv",
                      event->connect.status);
             ble_store_clear();
+            start_advertising();
         }
         return 0;
 

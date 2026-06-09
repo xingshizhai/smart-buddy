@@ -99,23 +99,40 @@ static const ble_uuid128_t nus_rx_uuid = {
  * to undirected.  10 s is enough for the Central to wake and connect. */
 #define DIRECTED_ADV_DURATION_MS  10000
 
+/* NVS namespace shared by our BLE address and bonded peer address */
+#define BLE_ADDR_NVS_NS   "ble_addr"
+
 /* Set to true once directed adv has timed out; cleared on connect/disconnect
  * so subsequent disconnects trigger a fresh directed-adv phase. */
 static bool s_directed_adv_done = false;
 
-/* Try to retrieve the first bonded peer's address.
- * Returns true and fills *out_addr if a bond is found, false otherwise. */
+/* NVS key for the last successfully bonded peer address.
+ * Written on ENC_CHANGE success; read on boot for directed advertising. */
+#define BLE_PEER_NVS_KEY  "peer_addr"
+
+/* Persist the peer's BLE address so directed advertising works across reboots. */
+static void save_bonded_peer(const ble_addr_t *peer)
+{
+    nvs_handle_t h;
+    if (nvs_open(BLE_ADDR_NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_blob(h, BLE_PEER_NVS_KEY, peer, sizeof(*peer));
+    nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGI(TAG, "bonded peer saved: %02X:%02X:%02X:%02X:%02X:%02X (type=%d)",
+             peer->val[5], peer->val[4], peer->val[3],
+             peer->val[2], peer->val[1], peer->val[0], peer->type);
+}
+
+/* Try to retrieve the last bonded peer's address from NVS.
+ * Returns true and fills *out_addr on success. */
 static bool get_bonded_peer(ble_addr_t *out_addr)
 {
-    struct ble_store_key_sec key = {0};
-    struct ble_store_value_sec val = {0};
-    key.peer_addr = *BLE_ADDR_ANY;   /* BLE_ADDR_ANY = "don't key off peer" → first bond */
-    key.idx = 0;
-    int rc = ble_store_read_our_sec(&key, &val);
-    if (rc != 0) return false;                /* no bond */
-    if (!val.ltk_present) return false;       /* not a full bond */
-    *out_addr = val.peer_addr;
-    return true;
+    nvs_handle_t h;
+    if (nvs_open(BLE_ADDR_NVS_NS, NVS_READONLY, &h) != ESP_OK) return false;
+    size_t len = sizeof(*out_addr);
+    esp_err_t err = nvs_get_blob(h, BLE_PEER_NVS_KEY, out_addr, &len);
+    nvs_close(h);
+    return (err == ESP_OK && len == sizeof(*out_addr));
 }
 
 static void start_advertising(void)
@@ -229,15 +246,32 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
              * below: stale LTK is cleared and fresh pairing is retried. */
             ble_gap_security_initiate(event->connect.conn_handle);
         } else {
-            /* Connection failed — peer likely has a stale LTK (e.g. after
-             * reflash wiped NVS). Clear all stored bonds so the next attempt
-             * forces fresh Just-Works pairing instead of looping on auth failures.
-             * NOTE: BLE_GAP_EVENT_CONNECT failure does NOT produce a subsequent
-             * DISCONNECT event, so we must restart advertising here ourselves. */
-            ESP_LOGW(TAG, "connect failed rc=%d — clearing all bonds, restarting adv",
-                     event->connect.status);
-            ble_store_clear();
-            start_advertising();
+            /* Connection failed.
+             *
+             * Only clear bonds for genuine authentication failures:
+             *   BLE_ERR_AUTH_FAIL (5)      — LTK rejected by us (key mismatch)
+             *   BLE_ERR_PINKEY_MISSING (6) — we have no LTK for this peer
+             * These mean the stored bond is stale and must be wiped so the
+             * next attempt starts fresh Just-Works pairing.
+             *
+             * Do NOT clear bonds for BLE_ERR_REM_USER_CONN_TERM (19 / 0x13).
+             * That code means the *peer* (macOS) chose to terminate — the bond
+             * data itself is fine.  Clearing on 0x13 destroys the bond on every
+             * reconnect attempt and permanently breaks auto-reconnect.
+             *
+             * For 0x13, a DISCONNECT event follows and will restart advertising.
+             * For auth errors, DISCONNECT does NOT follow, so we advertise here. */
+            if (event->connect.status == BLE_ERR_AUTH_FAIL ||
+                event->connect.status == BLE_ERR_PINKEY_MISSING) {
+                ESP_LOGW(TAG, "connect failed rc=%d (auth) — clearing bonds, restarting adv",
+                         event->connect.status);
+                ble_store_clear();
+                start_advertising();
+            } else {
+                ESP_LOGW(TAG, "connect failed rc=%d — waiting for DISCONNECT to restart adv",
+                         event->connect.status);
+                /* DISCONNECT event will restart advertising */
+            }
         }
         return 0;
 
@@ -272,6 +306,13 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
             s_ctx->secure = true;
             s_passkey = 0;
             ESP_LOGI(TAG, "encryption OK");
+            /* Persist peer address so directed advertising works after reboot */
+            {
+                struct ble_gap_conn_desc desc;
+                if (ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0) {
+                    save_bonded_peer(&desc.peer_id_addr);
+                }
+            }
             /* Only fire CONNECTED if CCCD is already subscribed; otherwise
              * BLE_GAP_EVENT_SUBSCRIBE will fire it when the time is right. */
             if (s_ctx->cccd_subscribed)
@@ -448,7 +489,6 @@ static void ble_host_task(void *param)
  * macOS sees a different BLE address → treats it as a new device → no stale
  * LTK conflict, fresh pairing happens automatically without "forget device".
  * ──────────────────────────────────────────────────────────────────────── */
-#define BLE_ADDR_NVS_NS   "ble_addr"
 #define BLE_ADDR_NVS_KEY  "rand_addr"
 
 static void ensure_random_static_addr(void)

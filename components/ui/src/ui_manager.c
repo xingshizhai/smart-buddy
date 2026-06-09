@@ -179,9 +179,10 @@ static void wake_guard_cb(lv_event_t *e)
         lv_timer_reset(s_screenoff_timer);
     }
 
-    /* Remove the guard — normal touches can now reach their targets */
+    /* Remove the guard — use async delete so we don't free the object while
+     * still inside its own event callback (would corrupt the LVGL heap). */
     if (s_wake_guard) {
-        lv_obj_del(s_wake_guard);
+        lv_obj_delete_async(s_wake_guard);
         s_wake_guard = NULL;
     }
 }

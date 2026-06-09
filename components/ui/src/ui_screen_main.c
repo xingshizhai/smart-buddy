@@ -30,7 +30,10 @@ void persona_frame_cb(const char *frame, void *ctx)
 static void main_settings_btn_cb(lv_event_t *e)
 {
     (void)e;
-    ui_manager_push(UI_SCREEN_SETTINGS, UI_ANIM_SLIDE_LEFT);
+    /* Settings screen uses no animation — the soft renderer takes ~150 ms per
+     * frame; with a 300 ms MOVE_LEFT animation the transition freezes at 50%.
+     * An instant cut is cleaner than a broken slide. */
+    ui_manager_push(UI_SCREEN_SETTINGS, UI_ANIM_NONE);
 }
 
 lv_obj_t *screen_main_create(void)

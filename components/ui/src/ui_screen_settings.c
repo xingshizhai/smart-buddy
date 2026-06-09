@@ -119,7 +119,7 @@ static void settings_info_btn_cb(lv_event_t *e)
 static void settings_back_btn_cb(lv_event_t *e)
 {
     (void)e;
-    ui_manager_pop(UI_ANIM_SLIDE_RIGHT);
+    ui_manager_pop(UI_ANIM_NONE);
 }
 
 lv_obj_t *screen_settings_create(void)
@@ -131,11 +131,17 @@ lv_obj_t *screen_settings_create(void)
     lv_obj_t *bar = ui_theme_create_title_bar(scr, "Settings");
     ui_theme_create_back_button(bar, settings_back_btn_cb);
 
+    /* Layout (320×240, title bar h=36):
+     *   Status panel : y=40, h=66   (3 rows × 18px in 54px inner, pad=6)
+     *   Volume panel : y=110, h=36  (label + slider in 24px inner, pad=6)
+     *   Nav list     : y=150, h=90  (shows ~3 buttons; 4th reachable by scroll)
+     */
     lv_obj_t *sp = lv_obj_create(scr);
-    lv_obj_set_size(sp, 304, 72);
-    lv_obj_align(sp, LV_ALIGN_TOP_MID, 0, 34);
+    lv_obj_set_size(sp, 304, 66);
+    lv_obj_align(sp, LV_ALIGN_TOP_MID, 0, 40);
     ui_theme_style_panel(sp);
     lv_obj_set_style_pad_all(sp, 6, 0);
+    lv_obj_set_style_shadow_width(sp, 0, 0);   /* no shadow — too slow for soft renderer */
     lv_obj_clear_flag(sp, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *ble_lbl = lv_label_create(sp);
@@ -177,10 +183,11 @@ lv_obj_t *screen_settings_create(void)
     lv_obj_align(s_set_usb_val, LV_ALIGN_TOP_LEFT, 52, 40);
 
     lv_obj_t *vp = lv_obj_create(scr);
-    lv_obj_set_size(vp, 304, 48);
+    lv_obj_set_size(vp, 304, 36);
     lv_obj_align(vp, LV_ALIGN_TOP_MID, 0, 110);
     ui_theme_style_panel(vp);
     lv_obj_set_style_pad_all(vp, 6, 0);
+    lv_obj_set_style_shadow_width(vp, 0, 0);   /* no shadow */
     lv_obj_clear_flag(vp, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *vol_lbl = lv_label_create(vp);
@@ -204,41 +211,76 @@ lv_obj_t *screen_settings_create(void)
     lv_obj_set_style_bg_color(s_set_vol_slider, p->panel_alt, LV_PART_MAIN);
     lv_obj_set_style_bg_color(s_set_vol_slider, p->accent, LV_PART_INDICATOR);
     lv_obj_set_style_bg_color(s_set_vol_slider, p->accent, LV_PART_KNOB);
+    /* Strip default-theme styles that trigger LVGL layer allocation:
+     * - knob pad_all > 0 makes the knob overflow the track → layer needed
+     * - grow/transform styles on PRESSED state animate transform_scale → layer
+     * - shadow on knob → expensive soft-blur */
+    lv_obj_set_style_pad_all(s_set_vol_slider, 0, LV_PART_KNOB);
+    lv_obj_set_style_shadow_width(s_set_vol_slider, 0, LV_PART_KNOB);
+    lv_obj_set_style_shadow_width(s_set_vol_slider, 0, LV_PART_MAIN);
+    lv_obj_set_style_transform_width(s_set_vol_slider, 0, LV_PART_KNOB | LV_STATE_PRESSED);
+    lv_obj_set_style_transform_height(s_set_vol_slider, 0, LV_PART_KNOB | LV_STATE_PRESSED);
+
     lv_obj_add_event_cb(s_set_vol_slider, settings_volume_slider_cb,
                         LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_add_event_cb(s_set_vol_slider, settings_volume_slider_cb,
                         LV_EVENT_RELEASED, NULL);
 
     lv_obj_t *list = lv_list_create(scr);
-    lv_obj_set_size(list, 304, 74);
-    lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 162);
+    lv_obj_set_size(list, 304, 90);
+    lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 150);
     lv_obj_set_style_bg_color(list, p->panel, 0);
     lv_obj_set_style_bg_opa(list, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(list, p->border, 0);
     lv_obj_set_style_border_width(list, 1, 0);
     lv_obj_set_style_pad_row(list, 4, 0);
     lv_obj_set_style_pad_all(list, 6, 0);
-    lv_obj_set_style_radius(list, 10, 0);
+    /* radius=0 + clip_corner=false: the default theme applies list_bg which sets
+     * clip_corner=true.  clip_corner triggers a MASK_RECTANGLE draw task that
+     * first clears the full area outside the rounded rect (top 150 px = 192 KB)
+     * then applies per-row anti-aliased masking — together this exceeds the 5 s
+     * task-watchdog timeout on this hardware.  Square corners are the fix. */
+    lv_obj_set_style_radius(list, 0, 0);
+    lv_obj_set_style_clip_corner(list, false, 0);
+
+    /* List buttons: use panel_alt style but strip shadows — shadow blur on
+     * multiple scrollable items causes LVGL rendering to take >5 s, triggering
+     * the task watchdog and leaving the bottom half of the display unpainted. */
+    /* Helper macro: style each list button.
+     * The default LVGL theme applies list_item_grow (transform_width=PAD_DEF)
+     * to every list button even in the DEFAULT state.  transform_width != 0
+     * makes LVGL allocate a full-screen ARGB layer buffer in PSRAM before each
+     * render — causing the task watchdog.  We override with 0 for all states. */
+#define STYLE_LIST_BTN(btn)  do { \
+    ui_theme_style_panel_alt(btn); \
+    lv_obj_set_style_shadow_width((btn), 0, 0); \
+    lv_obj_set_style_text_color((btn), p->text, 0); \
+    lv_obj_set_style_pad_ver((btn), 4, 0); \
+    lv_obj_set_style_transform_width((btn), 0, 0); \
+    lv_obj_set_style_transform_width((btn), 0, LV_STATE_PRESSED); \
+    lv_obj_set_style_transform_width((btn), 0, LV_STATE_FOCUS_KEY); \
+    lv_obj_set_style_transform_height((btn), 0, 0); \
+    lv_obj_set_style_transform_height((btn), 0, LV_STATE_PRESSED); \
+    lv_obj_set_style_transform_height((btn), 0, LV_STATE_FOCUS_KEY); \
+} while(0)
 
     lv_obj_t *btn_st = lv_list_add_btn(list, LV_SYMBOL_LIST, "Device Status");
-    ui_theme_style_panel_alt(btn_st);
-    lv_obj_set_style_text_color(btn_st, p->text, 0);
+    STYLE_LIST_BTN(btn_st);
     lv_obj_add_event_cb(btn_st, settings_status_btn_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *btn_ble = lv_list_add_btn(list, LV_SYMBOL_BLUETOOTH, "BLE Debug");
-    ui_theme_style_panel_alt(btn_ble);
-    lv_obj_set_style_text_color(btn_ble, p->text, 0);
+    STYLE_LIST_BTN(btn_ble);
     lv_obj_add_event_cb(btn_ble, settings_ble_debug_btn_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *btn_audio = lv_list_add_btn(list, LV_SYMBOL_AUDIO, "Audio Debug");
-    ui_theme_style_panel_alt(btn_audio);
-    lv_obj_set_style_text_color(btn_audio, p->text, 0);
+    STYLE_LIST_BTN(btn_audio);
     lv_obj_add_event_cb(btn_audio, settings_debug_btn_cb, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *btn_info = lv_list_add_btn(list, LV_SYMBOL_EDIT, "Info");
-    ui_theme_style_panel_alt(btn_info);
-    lv_obj_set_style_text_color(btn_info, p->text, 0);
+    STYLE_LIST_BTN(btn_info);
     lv_obj_add_event_cb(btn_info, settings_info_btn_cb, LV_EVENT_CLICKED, NULL);
+
+#undef STYLE_LIST_BTN
 
     return scr;
 }

@@ -223,17 +223,30 @@ void ui_manager_deinit(void)
     }
 }
 
+/* Helper: switch screens.  UI_ANIM_NONE uses lv_scr_load() directly so that
+ * lv_scr_load_anim()'s animation infrastructure (which allocates a full-screen
+ * ARGB layer buffer in PSRAM) is never triggered.  On this hardware the soft
+ * renderer takes ~150 ms per frame, so animated transitions freeze mid-way and
+ * instant transitions (lv_scr_load) are the only reliable option. */
+static void do_scr_load(lv_obj_t *scr, ui_anim_type_t anim)
+{
+    if (anim == UI_ANIM_NONE) {
+        lv_scr_load(scr);
+    } else {
+        lv_scr_load_anim(scr,
+                          anim == UI_ANIM_FADE       ? LV_SCR_LOAD_ANIM_FADE_ON     :
+                          anim == UI_ANIM_SLIDE_LEFT  ? LV_SCR_LOAD_ANIM_MOVE_LEFT  :
+                                                        LV_SCR_LOAD_ANIM_MOVE_RIGHT,
+                          200, 0, false);
+    }
+}
+
 esp_err_t ui_manager_show(ui_screen_id_t id, ui_anim_type_t anim)
 {
     if (id >= UI_SCREEN_MAX) return ESP_ERR_INVALID_ARG;
     ui_screen_id_t prev = ui_manager_current();
     if (lvgl_port_lock(100)) {
-        lv_scr_load_anim(s_screens[id],
-                          anim == UI_ANIM_FADE       ? LV_SCR_LOAD_ANIM_FADE_ON      :
-                          anim == UI_ANIM_SLIDE_LEFT  ? LV_SCR_LOAD_ANIM_MOVE_LEFT   :
-                          anim == UI_ANIM_SLIDE_RIGHT ? LV_SCR_LOAD_ANIM_MOVE_RIGHT  :
-                                                        LV_SCR_LOAD_ANIM_NONE,
-                          200, 0, false);
+        do_scr_load(s_screens[id], anim);
         s_stack_top = 0;
         s_stack[0]  = id;
         lvgl_port_unlock();
@@ -249,12 +262,7 @@ esp_err_t ui_manager_push(ui_screen_id_t id, ui_anim_type_t anim)
         s_stack[++s_stack_top] = id;
     }
     if (lvgl_port_lock(100)) {
-        lv_scr_load_anim(s_screens[id],
-                          anim == UI_ANIM_FADE       ? LV_SCR_LOAD_ANIM_FADE_ON      :
-                          anim == UI_ANIM_SLIDE_LEFT  ? LV_SCR_LOAD_ANIM_MOVE_LEFT   :
-                          anim == UI_ANIM_SLIDE_RIGHT ? LV_SCR_LOAD_ANIM_MOVE_RIGHT  :
-                                                        LV_SCR_LOAD_ANIM_NONE,
-                          200, 0, false);
+        do_scr_load(s_screens[id], anim);
         lvgl_port_unlock();
     }
     notify_screen_lifecycle(prev, id);
@@ -267,12 +275,7 @@ esp_err_t ui_manager_pop(ui_anim_type_t anim)
     if (s_stack_top > 0) s_stack_top--;
     ui_screen_id_t next = s_stack[s_stack_top];
     if (lvgl_port_lock(100)) {
-        lv_scr_load_anim(s_screens[next],
-                          anim == UI_ANIM_FADE       ? LV_SCR_LOAD_ANIM_FADE_ON      :
-                          anim == UI_ANIM_SLIDE_LEFT  ? LV_SCR_LOAD_ANIM_MOVE_LEFT   :
-                          anim == UI_ANIM_SLIDE_RIGHT ? LV_SCR_LOAD_ANIM_MOVE_RIGHT  :
-                                                        LV_SCR_LOAD_ANIM_NONE,
-                          200, 0, false);
+        do_scr_load(s_screens[next], anim);
         lvgl_port_unlock();
     }
     notify_screen_lifecycle(prev, next);

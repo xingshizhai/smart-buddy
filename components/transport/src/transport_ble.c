@@ -120,14 +120,48 @@ static bool get_bonded_peer(ble_addr_t *out_addr)
 
 static void start_advertising(void)
 {
+    /* Use random static address (set in ensure_random_static_addr via sync_cb) */
+    uint8_t own_addr_type = BLE_OWN_ADDR_RANDOM;
+    int rc;
+
+    /* ── Phase 1: Low Duty Cycle Directed Advertising ──────────────────────
+     * Directed advertising has NO payload (no adv fields, no scan response).
+     * The peer is identified by address only.  disc_mode must be NON.
+     * macOS BLE controller reconnects at the controller layer — no app-level
+     * connect() call required in Claude Desktop.
+     * After DIRECTED_ADV_DURATION_MS the ADV_COMPLETE event fires → Phase 2.
+     * ────────────────────────────────────────────────────────────────────── */
+    ble_addr_t bonded_peer;
+    if (!s_directed_adv_done && get_bonded_peer(&bonded_peer)) {
+        struct ble_gap_adv_params dir_params = {0};
+        dir_params.conn_mode       = BLE_GAP_CONN_MODE_DIR;
+        dir_params.disc_mode       = BLE_GAP_DISC_MODE_NON;  /* required for directed */
+        dir_params.high_duty_cycle = 0;                       /* LDC: no 1.28 s limit */
+
+        rc = ble_gap_adv_start(own_addr_type, &bonded_peer, DIRECTED_ADV_DURATION_MS,
+                               &dir_params, ble_gap_event_cb, NULL);
+        if (rc == 0) {
+            ESP_LOGI(TAG, "directed adv → %02X:%02X:%02X:%02X:%02X:%02X (%d ms)",
+                     bonded_peer.val[5], bonded_peer.val[4], bonded_peer.val[3],
+                     bonded_peer.val[2], bonded_peer.val[1], bonded_peer.val[0],
+                     DIRECTED_ADV_DURATION_MS);
+            return;
+        }
+        ESP_LOGW(TAG, "directed adv failed rc=%d, using undirected", rc);
+        s_directed_adv_done = true;  /* don't retry directed if it failed */
+    }
+
+    /* ── Phase 2: Undirected Advertising ───────────────────────────────────
+     * Standard connectable undirected advertising with NUS UUID + name.
+     * Required for new peers to discover and pair.
+     * ────────────────────────────────────────────────────────────────────── */
     struct ble_hs_adv_fields fields;
     memset(&fields, 0, sizeof(fields));
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
 
     /* Adv packet: flags + NUS UUID + shortened name "Claude".
-     * Budget: 3 (flags) + 18 (uuid128) + 8 ("Claude" + 2 overhead) = 29 B.
      * The shortened name ensures macOS passive-scan sees "claude…" even
-     * before receiving the scan response, satisfying Claude Desktop's
+     * before the scan response, satisfying Claude Desktop's
      * c.startsWith("claude") filter. */
     fields.uuids128 = (ble_uuid128_t *)&nus_svc_uuid;
     fields.num_uuids128 = 1;
@@ -136,13 +170,11 @@ static void start_advertising(void)
     fields.name_len = 6;
     fields.name_is_complete = 0;   /* AD type 0x08 = Shortened Local Name */
 
-    int rc = ble_gap_adv_set_fields(&fields);
+    rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
-        ESP_LOGE(TAG, "adv set fields failed: rc=%d (packet too large?)", rc);
+        ESP_LOGE(TAG, "adv set fields failed: rc=%d", rc);
         return;
     }
-    ESP_LOGI(TAG, "adv fields OK: flags=0x%02x uuid128_count=%d",
-             fields.flags, fields.num_uuids128);
 
     /* Scan response: full unique name "ClaudeXXYY". */
     const char *name = ble_svc_gap_device_name();
@@ -158,57 +190,20 @@ static void start_advertising(void)
             ESP_LOGE(TAG, "adv rsp set fields: %d", rc);
             return;
         }
-        if (name[name_len] != '\0') {
-            ESP_LOGW(TAG, "device name too long for scan response, truncated to %d bytes", BLE_SCAN_RSP_MAX_NAME_LEN);
-        }
-        ESP_LOGI(TAG, "device name: '%s' (len=%d)", name, rsp.name_len);
-    }
-
-    /* Use random static address (set in ensure_random_static_addr via sync_cb) */
-    uint8_t own_addr_type = BLE_OWN_ADDR_RANDOM;
-
-    /* ── Directed advertising for fast reconnect ──────────────────────────
-     * If we have a stored bond, first send Low Duty Cycle Directed Advertising
-     * to the bonded peer.  The macOS BLE controller handles directed adv at
-     * the controller layer — it reconnects immediately without requiring the
-     * Central app (Claude Desktop) to call connect() explicitly.
-     * Duration: DIRECTED_ADV_DURATION_MS ms; then ADV_COMPLETE fires and we
-     * fall back to undirected advertising so new peers can pair too.
-     * ──────────────────────────────────────────────────────────────────── */
-    ble_addr_t bonded_peer;
-    if (!s_directed_adv_done && get_bonded_peer(&bonded_peer)) {
-        struct ble_gap_adv_params dir_params = {0};
-        dir_params.conn_mode    = BLE_GAP_CONN_MODE_DIR;
-        dir_params.disc_mode    = BLE_GAP_DISC_MODE_GEN;
-        dir_params.high_duty_cycle = 0;   /* Low Duty Cycle — no 1.28 s limit */
-        /* BLE spec default LDC directed adv interval: ~250 ms */
-        dir_params.itvl_min = BLE_GAP_ADV_ITVL_MS(250);
-        dir_params.itvl_max = BLE_GAP_ADV_ITVL_MS(250);
-
-        rc = ble_gap_adv_start(own_addr_type, &bonded_peer, DIRECTED_ADV_DURATION_MS,
-                               &dir_params, ble_gap_event_cb, NULL);
-        if (rc == 0) {
-            ESP_LOGI(TAG, "directed adv → peer %02X:%02X:%02X:%02X:%02X:%02X (%d ms)",
-                     bonded_peer.val[5], bonded_peer.val[4], bonded_peer.val[3],
-                     bonded_peer.val[2], bonded_peer.val[1], bonded_peer.val[0],
-                     DIRECTED_ADV_DURATION_MS);
-            return;
-        }
-        ESP_LOGW(TAG, "directed adv start failed rc=%d, falling through to undirected", rc);
+        ESP_LOGI(TAG, "device name: '%s' (len=%zu)", name, name_len);
     }
 
     struct ble_gap_adv_params adv_params = {0};
     adv_params.conn_mode  = BLE_GAP_CONN_MODE_UND;
     adv_params.disc_mode  = BLE_GAP_DISC_MODE_GEN;
-    /* 100 ms interval — fast enough for reliable discovery without burning power */
-    adv_params.itvl_min = BLE_GAP_ADV_ITVL_MS(100);
-    adv_params.itvl_max = BLE_GAP_ADV_ITVL_MS(100);
+    adv_params.itvl_min   = BLE_GAP_ADV_ITVL_MS(100);
+    adv_params.itvl_max   = BLE_GAP_ADV_ITVL_MS(100);
 
     rc = ble_gap_adv_start(own_addr_type, NULL, BLE_HS_FOREVER,
                            &adv_params, ble_gap_event_cb, NULL);
-    if (rc == BLE_HS_EALREADY) return;  /* already advertising, no-op */
+    if (rc == BLE_HS_EALREADY) return;
     if (rc != 0) { ESP_LOGE(TAG, "adv start: %d", rc); return; }
-    ESP_LOGI(TAG, "advertising as '%s'", name ? name : "unknown");
+    ESP_LOGI(TAG, "undirected adv started");
 }
 
 /* ── GAP event handler ─────────────────────────────────────────────── */

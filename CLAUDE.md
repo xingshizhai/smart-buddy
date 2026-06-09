@@ -13,13 +13,15 @@
 | Activate then manual | `powershell -NoProfile -Command ". '$PWD\build_esp32.ps1' -ActivateOnly; idf.py menuconfig"` |
 | Flash only (after build) | `powershell -NoProfile -Command ". '$PWD\build_esp32.ps1' -ActivateOnly; idf.py -p COM3 flash"` |
 | Monitor only | `powershell -NoProfile -Command ". '$PWD\build_esp32.ps1' -ActivateOnly; idf.py -p COM3 monitor"` |
+| **macOS** flash + monitor | `idf.py -p /dev/cu.usbmodem31401 flash monitor` |
+| **macOS** monitor only | `idf.py -p /dev/cu.usbmodem31401 monitor` |
 
 ### Key rules
 
 1. **Must dot-source** (`.`) `build_esp32.ps1` so that environment variables (PATH, IDF_PATH etc.) are preserved in the current shell. Without dot-sourcing, the environment disappears when the script exits.
 2. **Activate and `idf.py` must be in the same command** (same process). e.g. `". 'build_esp32.ps1' -ActivateOnly; idf.py build"`.
 3. The `-ActivateOnly` flag uses `return` (not `exit`) so that subsequent commands in the same `-Command` line continue to execute.
-4. The port is **COM3** on this machine.
+4. The port is **COM3** on Windows. On macOS the device appears as `/dev/cu.usbmodem31401`.
 5. If a serial monitor is already running and the port is busy, kill the existing monitor process first.
 
 ### Build script details
@@ -34,7 +36,7 @@
 - **ESP-IDF version**: v6.0.1 (NimBLE BLE stack)
 - **BLE Device name**: Auto-generated as `BuddyXXYY` from MAC address (bytes 4-5)
 - **BLE Advertising**: NUS 128-bit UUID in adv packet, device name in scan response
-- **Serial port**: COM3
+- **Serial port**: COM3 (Windows) / `/dev/cu.usbmodem31401` (macOS)
 - **Transport layer**: BLE (NUS), Wi-Fi WebSocket, USB CDC-ACM
 
 ### Network

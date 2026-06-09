@@ -176,8 +176,10 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
             ESP_LOGI(TAG, "connected conn_handle=%d", s_ctx->conn_handle);
             /* Do NOT fire state_cb(CONNECTED) yet — wait for CCCD subscription
              * so the first TX (heartbeat ack) succeeds immediately. */
-            /* Keep link establishment permissive to avoid desktop-side
-             * disconnect loops on security negotiation failures. */
+            /* Initiate security immediately so Desktop doesn't deadlock waiting
+             * for us to start the pairing flow. ENC_CHANGE failure is handled
+             * below: stale LTK is cleared and fresh pairing is retried. */
+            ble_gap_security_initiate(event->connect.conn_handle);
         } else {
             ESP_LOGE(TAG, "connect failed rc=%d", event->connect.status);
             start_advertising();

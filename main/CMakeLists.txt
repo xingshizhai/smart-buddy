@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "main.c"
+    SRCS "main.c" "app_notify.c"
     INCLUDE_DIRS "."
     REQUIRES
         buddy_hal

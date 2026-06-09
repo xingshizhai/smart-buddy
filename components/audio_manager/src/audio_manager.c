@@ -1,5 +1,6 @@
 #include <string.h>
 #include <stdlib.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -288,4 +289,51 @@ esp_err_t audio_manager_set_volume(uint8_t vol_pct)
     hal_storage_set_u32(NVS_KEY_VOLUME, vol_pct);
     ESP_LOGI(TAG, "volume set to %u%%", vol_pct);
     return ESP_OK;
+}
+
+/* ── Alert preview tone ────────────────────────────────────────────────────── */
+
+#define ALERT_SR           16000
+#define ALERT_BEEP_MS      180
+#define ALERT_GAP_MS       120
+#define ALERT_FADE_MS      20
+#define ALERT_BEEP_SAMPLES (ALERT_SR * ALERT_BEEP_MS  / 1000)
+#define ALERT_GAP_SAMPLES  (ALERT_SR * ALERT_GAP_MS   / 1000)
+#define ALERT_FADE_SAMPLES (ALERT_SR * ALERT_FADE_MS  / 1000)
+#define ALERT_TOTAL        (ALERT_BEEP_SAMPLES * 2 + ALERT_GAP_SAMPLES)
+#define ALERT_AMPLITUDE    22000
+
+static int16_t *s_alert_buf = NULL;
+
+static void build_alert_tone(void)
+{
+    if (s_alert_buf) return;
+    s_alert_buf = malloc(ALERT_TOTAL * sizeof(int16_t));
+    if (!s_alert_buf) return;
+
+    static const float freqs[2] = {800.0f, 1050.0f};
+    for (int b = 0; b < 2; b++) {
+        int off = b * (ALERT_BEEP_SAMPLES + ALERT_GAP_SAMPLES);
+        for (int i = 0; i < ALERT_BEEP_SAMPLES; i++) {
+            float env = 1.0f;
+            if (i < ALERT_FADE_SAMPLES)
+                env = (float)i / (float)ALERT_FADE_SAMPLES;
+            else if (i > ALERT_BEEP_SAMPLES - ALERT_FADE_SAMPLES)
+                env = (float)(ALERT_BEEP_SAMPLES - i) / (float)ALERT_FADE_SAMPLES;
+            float t = (float)i / (float)ALERT_SR;
+            s_alert_buf[off + i] = (int16_t)(ALERT_AMPLITUDE * env *
+                                             sinf(2.0f * (float)M_PI * freqs[b] * t));
+        }
+        if (b == 0)
+            memset(&s_alert_buf[ALERT_BEEP_SAMPLES], 0,
+                   ALERT_GAP_SAMPLES * sizeof(int16_t));
+    }
+}
+
+void audio_manager_play_alert_preview(void)
+{
+    build_alert_tone();
+    if (!s_alert_buf) return;
+    audio_manager_play_stop();
+    audio_manager_play_raw(s_alert_buf, ALERT_TOTAL);
 }

@@ -20,6 +20,7 @@
 #include "ui/ui_fonts.h"
 #include "ui/ui_button_router.h"
 #include "app_config.h"
+#include "app_notify.h"
 
 #define TAG "MAIN"
 
@@ -49,6 +50,12 @@ static void left_long_press_cb(hal_button_id_t id, hal_button_event_t evt, void 
 {
     (void)id; (void)evt; (void)ctx;
     ui_button_router_handle(BTN_ACTION_LEFT_LONG);
+}
+
+static void app_sm_callback(sm_state_t new_state, sm_state_t old_state, void *ctx)
+{
+    app_notify_on_state_change(new_state, old_state);
+    ui_manager_on_state_change(new_state, old_state, ctx);
 }
 
 /* ── Push-to-talk ────────────────────────────────────────────────────── */
@@ -169,6 +176,7 @@ void app_main(void)
 
     /* 3b. Audio manager (recording pipeline + playback queue) */
     ESP_ERROR_CHECK(audio_manager_init(g_hal.audio));
+    app_notify_init();
 
     /* 4. UI — show boot screen */
     ui_fonts_init();
@@ -177,7 +185,7 @@ void app_main(void)
 
     /* 5. State machine */
     ESP_ERROR_CHECK(sm_create(&s_sm));
-    sm_register_callback(s_sm, ui_manager_on_state_change, NULL);
+    sm_register_callback(s_sm, app_sm_callback, NULL);
 
     /* 6. Protocol adapters */
     proto_t *proto = NULL;

@@ -63,3 +63,6 @@ esp_err_t audio_manager_set_volume(uint8_t vol_pct);
 
 /* Apply codec output level without changing the stored preference. */
 esp_err_t audio_manager_apply_volume(uint8_t vol_pct);
+
+/* Play the two-tone attention alert. Stops any current playback first. */
+void audio_manager_play_alert_preview(void);

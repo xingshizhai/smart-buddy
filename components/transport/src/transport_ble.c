@@ -9,7 +9,6 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_random.h"
-#include "nvs_flash.h"
 #include "nimble/ble.h"
 #include "host/ble_hs.h"
 #include "host/ble_uuid.h"
@@ -64,10 +63,11 @@ static void deferred_state_cb(void *arg)
 
 static void fire_state_cb_async(transport_id_t id, transport_state_t state, void *ctx)
 {
-    s_pending_state_id = id;
-    s_pending_state = state;
+    s_pending_state_id  = id;
+    s_pending_state     = state;
     s_pending_state_ctx = ctx;
-    esp_timer_start_once(s_state_timer, 0);  /* fire ASAP after returning to event loop */
+    esp_timer_stop(s_state_timer);         /* no-op if not running; safe to ignore error */
+    esp_timer_start_once(s_state_timer, 0);
 }
 
 static void start_advertising(void);
@@ -425,15 +425,6 @@ static esp_err_t ble_tp_start(transport_t *t)
 {
     ESP_LOGI(TAG, "ble_tp_start: entry");
     
-    /* Initialize NVS for BLE bonding */
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(err);
-    ESP_LOGI(TAG, "NVS init OK");
-
     /* Step 1: Initialize NimBLE host */
     nimble_port_init();
     ESP_LOGI(TAG, "nimble_port_init OK");

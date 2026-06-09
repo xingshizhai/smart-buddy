@@ -410,6 +410,8 @@ static esp_err_t ble_tp_init(transport_t *t, const void *cfg)
 
 static esp_err_t ble_tp_start(transport_t *t)
 {
+    ESP_LOGI(TAG, "ble_tp_start: entry");
+    
     /* Initialize NVS for BLE bonding */
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -417,9 +419,11 @@ static esp_err_t ble_tp_start(transport_t *t)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+    ESP_LOGI(TAG, "NVS init OK");
 
     /* Step 1: Initialize NimBLE host */
     nimble_port_init();
+    ESP_LOGI(TAG, "nimble_port_init OK");
 
     /* Step 2: Configure host callbacks */
     ble_hs_cfg.sync_cb = ble_hs_sync_cb;
@@ -434,22 +438,27 @@ static esp_err_t ble_tp_start(transport_t *t)
     ble_hs_cfg.sm_bonding = 1;
     ble_hs_cfg.sm_our_key_dist   = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ESP_LOGI(TAG, "BLE SM config OK");
 
     /* Step 3: Initialize GAP/GATT services, register custom services */
     ble_svc_gap_init();
     ble_svc_gatt_init();
+    ESP_LOGI(TAG, "GAP/GATT services init OK");
 
     int rc = ble_gatts_count_cfg(nus_gatt_svcs);
     if (rc != 0) { ESP_LOGE(TAG, "ble_gatts_count_cfg: %d", rc); return ESP_FAIL; }
 
     rc = ble_gatts_add_svcs(nus_gatt_svcs);
     if (rc != 0) { ESP_LOGE(TAG, "ble_gatts_add_svcs: %d", rc); return ESP_FAIL; }
+    ESP_LOGI(TAG, "NUS service registered");
 
     /* Step 4: Set device name AFTER GATT services registered */
     ble_svc_gap_device_name_set(s_ctx->device_name);
+    ESP_LOGI(TAG, "Device name set to: %s", s_ctx->device_name);
 
     /* Step 5: Initialize NVS storage for bonding */
     ble_store_config_init();
+    ESP_LOGI(TAG, "BLE store config OK");
 
     /* Note: val handles are synced in ble_hs_sync_cb() after NimBLE assigns them. */
 
@@ -459,9 +468,12 @@ static esp_err_t ble_tp_start(transport_t *t)
         .name     = "ble_state",
     };
     ESP_ERROR_CHECK(esp_timer_create(&sta, &s_state_timer));
+    ESP_LOGI(TAG, "State timer created");
 
     /* Step 7: Start host task (triggers sync_cb → advertising) */
+    ESP_LOGI(TAG, "Starting NimBLE host task...");
     nimble_port_freertos_init(ble_host_task);
+    ESP_LOGI(TAG, "nimble_port_freertos_init returned");
 
     return ESP_OK;
 }

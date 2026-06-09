@@ -5,9 +5,12 @@
 #include "freertos/queue.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "buddy_hal/hal_storage.h"
 #include "audio_manager.h"
 
 #define TAG "AUDIO_MGR"
+
+#define NVS_KEY_VOLUME  "spk_vol"
 
 /* ── Tunables ─────────────────────────────────────────────────────────────── */
 #define RECORD_CHUNK_SAMPLES    512          /* ~32 ms at 16 kHz             */
@@ -38,6 +41,8 @@ static audio_chunk_cb_t       s_chunk_cb      = NULL;
 static void                  *s_chunk_ctx     = NULL;
 static audio_record_done_cb_t s_done_cb       = NULL;
 static void                  *s_done_ctx      = NULL;
+
+static uint8_t                s_volume_pct    = AUDIO_MANAGER_VOLUME_DEFAULT;
 
 /* PSRAM-backed recording ring buffer */
 static int16_t               *s_rec_buf       = NULL;
@@ -136,12 +141,31 @@ static void play_task(void *arg)
     }
 }
 
+/* ── Volume helpers ───────────────────────────────────────────────────────── */
+
+static esp_err_t apply_codec_volume(uint8_t vol_pct)
+{
+    if (!s_audio || !s_audio->set_volume) return ESP_ERR_INVALID_STATE;
+    return s_audio->set_volume(s_audio, vol_pct);
+}
+
+static void load_volume_from_nvs(void)
+{
+    uint32_t stored = AUDIO_MANAGER_VOLUME_DEFAULT;
+    hal_storage_get_u32(NVS_KEY_VOLUME, &stored, AUDIO_MANAGER_VOLUME_DEFAULT);
+    if (stored > AUDIO_MANAGER_VOLUME_MAX) stored = AUDIO_MANAGER_VOLUME_MAX;
+    s_volume_pct = (uint8_t)stored;
+}
+
 /* ── Public API ───────────────────────────────────────────────────────────── */
 
 esp_err_t audio_manager_init(hal_audio_t *audio)
 {
     if (!audio) return ESP_ERR_INVALID_ARG;
     s_audio = audio;
+
+    load_volume_from_nvs();
+    apply_codec_volume(s_volume_pct);
 
     /* Allocate recording buffer in PSRAM if available, else internal RAM */
     s_rec_buf = heap_caps_malloc(MAX_RECORD_SAMPLES * sizeof(int16_t),
@@ -242,8 +266,26 @@ bool audio_manager_is_playing(void)
     return s_playing;
 }
 
+uint8_t audio_manager_get_volume(void)
+{
+    return s_volume_pct;
+}
+
+esp_err_t audio_manager_apply_volume(uint8_t vol_pct)
+{
+    if (vol_pct > AUDIO_MANAGER_VOLUME_MAX) return ESP_ERR_INVALID_ARG;
+    return apply_codec_volume(vol_pct);
+}
+
 esp_err_t audio_manager_set_volume(uint8_t vol_pct)
 {
-    if (!s_audio || !s_audio->set_volume) return ESP_ERR_INVALID_STATE;
-    return s_audio->set_volume(s_audio, vol_pct);
+    if (vol_pct > AUDIO_MANAGER_VOLUME_MAX) return ESP_ERR_INVALID_ARG;
+
+    s_volume_pct = vol_pct;
+    esp_err_t r = apply_codec_volume(vol_pct);
+    if (r != ESP_OK) return r;
+
+    hal_storage_set_u32(NVS_KEY_VOLUME, vol_pct);
+    ESP_LOGI(TAG, "volume set to %u%%", vol_pct);
+    return ESP_OK;
 }

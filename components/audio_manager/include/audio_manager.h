@@ -53,5 +53,13 @@ esp_err_t audio_manager_play_stop(void);
 
 bool      audio_manager_is_playing(void);
 
-/* Volume (0–100). Applied immediately to the speaker codec. */
+/* Alert / notification volume (0–100), persisted in NVS. */
+#define AUDIO_MANAGER_VOLUME_DEFAULT  70
+#define AUDIO_MANAGER_VOLUME_MIN      0
+#define AUDIO_MANAGER_VOLUME_MAX      100
+
+uint8_t   audio_manager_get_volume(void);
 esp_err_t audio_manager_set_volume(uint8_t vol_pct);
+
+/* Apply codec output level without changing the stored preference. */
+esp_err_t audio_manager_apply_volume(uint8_t vol_pct);

@@ -76,7 +76,14 @@ static void play_attention_tone(void)
 {
     build_alert_tone();
     if (!s_alert_buf) return;
-    audio_manager_set_volume(70);
+    audio_manager_play_raw(s_alert_buf, ALERT_TOTAL);
+}
+
+static void play_alert_preview(void)
+{
+    build_alert_tone();
+    if (!s_alert_buf) return;
+    audio_manager_play_stop();
     audio_manager_play_raw(s_alert_buf, ALERT_TOTAL);
 }
 /* ------------------------------------------------------------------------- */
@@ -135,9 +142,11 @@ static lv_obj_t *s_status_heap       = NULL;
 static lv_obj_t *s_status_transport  = NULL;
 
 /* Settings screen status panel live labels */
-static lv_obj_t *s_set_ble_val  = NULL;
-static lv_obj_t *s_set_wifi_val = NULL;
-static lv_obj_t *s_set_usb_val  = NULL;
+static lv_obj_t *s_set_ble_val   = NULL;
+static lv_obj_t *s_set_wifi_val  = NULL;
+static lv_obj_t *s_set_usb_val   = NULL;
+static lv_obj_t *s_set_vol_slider = NULL;
+static lv_obj_t *s_set_vol_label  = NULL;
 
 static lv_timer_t *s_approval_timer  = NULL;
 static lv_timer_t *s_screenoff_timer = NULL;
@@ -514,6 +523,37 @@ static void settings_back_btn_cb(lv_event_t *e)
     ui_manager_pop(UI_ANIM_SLIDE_RIGHT);
 }
 
+static void settings_volume_label_update(int32_t vol)
+{
+    if (!s_set_vol_label) return;
+    char buf[8];
+    snprintf(buf, sizeof(buf), "%ld%%", (long)vol);
+    lv_label_set_text(s_set_vol_label, buf);
+}
+
+static void settings_volume_slider_cb(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code != LV_EVENT_VALUE_CHANGED && code != LV_EVENT_RELEASED) return;
+
+    lv_obj_t *slider = lv_event_get_target(e);
+    int32_t vol = lv_slider_get_value(slider);
+    settings_volume_label_update(vol);
+    audio_manager_set_volume((uint8_t)vol);
+
+    if (code == LV_EVENT_RELEASED && vol > 0) {
+        play_alert_preview();
+    }
+}
+
+static void settings_refresh_volume(void)
+{
+    if (!s_set_vol_slider) return;
+    uint8_t vol = audio_manager_get_volume();
+    lv_slider_set_value(s_set_vol_slider, vol, LV_ANIM_OFF);
+    settings_volume_label_update(vol);
+}
+
 static void settings_refresh_status(void)
 {
     const ui_palette_t *p = ui_theme_palette();
@@ -625,10 +665,44 @@ static lv_obj_t *screen_settings_create(void)
     lv_obj_set_style_text_font(s_set_usb_val, &lv_font_montserrat_14, 0);
     lv_obj_align(s_set_usb_val, LV_ALIGN_TOP_LEFT, 52, 40);
 
+    /* ── Alert volume panel ─────────────────────────────────────────── */
+    lv_obj_t *vp = lv_obj_create(scr);
+    lv_obj_set_size(vp, 304, 48);
+    lv_obj_align(vp, LV_ALIGN_TOP_MID, 0, 110);
+    ui_theme_style_panel(vp);
+    lv_obj_set_style_pad_all(vp, 6, 0);
+    lv_obj_clear_flag(vp, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *vol_lbl = lv_label_create(vp);
+    lv_label_set_text(vol_lbl, LV_SYMBOL_VOLUME_MAX " Alert Volume");
+    lv_obj_set_style_text_color(vol_lbl, p->text_muted, 0);
+    lv_obj_set_style_text_font(vol_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_align(vol_lbl, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    s_set_vol_label = lv_label_create(vp);
+    lv_obj_set_style_text_color(s_set_vol_label, p->accent, 0);
+    lv_obj_set_style_text_font(s_set_vol_label, &lv_font_montserrat_14, 0);
+    lv_obj_align(s_set_vol_label, LV_ALIGN_TOP_RIGHT, 0, 0);
+    settings_volume_label_update(audio_manager_get_volume());
+
+    s_set_vol_slider = lv_slider_create(vp);
+    lv_obj_set_size(s_set_vol_slider, 276, 8);
+    lv_slider_set_range(s_set_vol_slider, AUDIO_MANAGER_VOLUME_MIN,
+                        AUDIO_MANAGER_VOLUME_MAX);
+    lv_slider_set_value(s_set_vol_slider, audio_manager_get_volume(), LV_ANIM_OFF);
+    lv_obj_align(s_set_vol_slider, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(s_set_vol_slider, p->panel_alt, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_set_vol_slider, p->accent, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(s_set_vol_slider, p->accent, LV_PART_KNOB);
+    lv_obj_add_event_cb(s_set_vol_slider, settings_volume_slider_cb,
+                        LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(s_set_vol_slider, settings_volume_slider_cb,
+                        LV_EVENT_RELEASED, NULL);
+
     /* ── Navigation list ────────────────────────────────────────────── */
     lv_obj_t *list = lv_list_create(scr);
-    lv_obj_set_size(list, 304, 122);
-    lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 112);
+    lv_obj_set_size(list, 304, 74);
+    lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 162);
     lv_obj_set_style_bg_color(list, p->panel, 0);
     lv_obj_set_style_bg_opa(list, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(list, p->border, 0);
@@ -687,7 +761,10 @@ static void notify_screen_lifecycle(ui_screen_id_t leaving, ui_screen_id_t enter
     if (entering == UI_SCREEN_CLOCK)      ui_screen_clock_start();
     if (leaving == UI_SCREEN_CLOCK)       ui_screen_clock_stop();
     if (entering == UI_SCREEN_STATS)      ui_screen_stats_refresh();
-    if (entering == UI_SCREEN_SETTINGS)   settings_refresh_status();
+    if (entering == UI_SCREEN_SETTINGS) {
+        settings_refresh_status();
+        settings_refresh_volume();
+    }
 
     /* Wake screen from screen-off on any navigation */
     if (s_screen_dimmed) {

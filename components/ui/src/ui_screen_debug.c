@@ -176,7 +176,7 @@ static void play_btn_cb(lv_event_t *e)
         audio_manager_play_stop();
         return;
     }
-    audio_manager_set_volume(100);
+    audio_manager_apply_volume(100);
     esp_err_t r = audio_manager_play_raw(s_last_rec, s_last_rec_n);
     if (r != ESP_OK) ESP_LOGE(TAG, "play_raw failed: %s", esp_err_to_name(r));
 }
@@ -201,7 +201,7 @@ static void tone_btn_cb(lv_event_t *e)
         }
     }
 
-    audio_manager_set_volume(100);
+    audio_manager_apply_volume(100);
     esp_err_t r = audio_manager_play_raw(s_tone_buf, TONE_SAMPLES);
     if (r != ESP_OK) ESP_LOGE(TAG, "tone play failed: %s", esp_err_to_name(r));
     else ESP_LOGI(TAG, "playing %d Hz test tone", TONE_HZ);
@@ -215,6 +215,7 @@ static void back_btn_cb(lv_event_t *e)
         s_rec_active = false;
     }
     if (audio_manager_is_playing()) audio_manager_play_stop();
+    audio_manager_apply_volume(audio_manager_get_volume());
 
     if (lvgl_port_lock(50)) {
         if (s_update_timer) { lv_timer_pause(s_update_timer); }
@@ -398,4 +399,5 @@ void ui_screen_debug_on_hide(void)
     /* Remove audio callbacks so they don't fire when screen is invisible */
     audio_manager_set_chunk_cb(NULL, NULL);
     audio_manager_set_record_done_cb(NULL, NULL);
+    audio_manager_apply_volume(audio_manager_get_volume());
 }

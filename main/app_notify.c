@@ -4,9 +4,8 @@
 
 void app_notify_init(void)
 {
-    /* Pre-warm the alert tone buffer in audio_manager. */
-    audio_manager_play_alert_preview();
-    audio_manager_play_stop();
+    /* Alert tone buffer is built lazily on first use in audio_manager.
+     * Do not pre-warm here — BT controller init needs that heap. */
 }
 
 void app_notify_on_state_change(sm_state_t new_state, sm_state_t old_state)

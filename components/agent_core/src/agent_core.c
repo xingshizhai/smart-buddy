@@ -33,9 +33,10 @@ static int  s_connected_count = 0;
 static esp_timer_handle_t s_turn_timer = NULL;
 static bool s_turn_in_progress = false;
 
-/* Last known msg/running for change detection */
+/* Last known msg/running/waiting for change detection */
 static char    s_last_msg[24]     = {0};
 static uint8_t s_last_running     = 0;
+static uint32_t s_last_waiting    = 0;
 
 static void turn_timer_cb(void *arg)
 {
@@ -163,6 +164,14 @@ static void agent_task(void *arg)
                 ESP_LOGI(TAG, "→ posting APPROVAL_REQUEST (waiting=%lu)", (unsigned long)waiting);
                 sm_evt.type = SM_EVT_APPROVAL_REQUEST;
                 sm_post_event(s_sm, &sm_evt);
+            } else if (s_last_waiting > 0 && waiting == 0) {
+                /* Approval was resolved remotely (e.g. user approved on Claude Desktop).
+                 * waiting dropped to 0 — dismiss the approval screen. */
+                ESP_LOGI(TAG, "→ remote approval resolved (waiting %lu→0) → APPROVAL_RESOLVED",
+                         (unsigned long)s_last_waiting);
+                sm_evt.type = SM_EVT_APPROVAL_RESOLVED;
+                sm_evt.data.approved = true;
+                sm_post_event(s_sm, &sm_evt);
             } else if (evt.data.session.completed && !s_turn_in_progress) {
                 /* completed=true: Claude finished a response → CELEBRATE */
                 ESP_LOGI(TAG, "→ completed=true → SESSION_ENDED (CELEBRATE)");
@@ -209,6 +218,7 @@ static void agent_task(void *arg)
                 ESP_LOGI(TAG, "msg changed: '%s' → '%s'", s_last_msg, new_msg);
             }
             s_last_running = (uint8_t)(running > 255 ? 255 : running);
+            s_last_waiting = waiting;
             strlcpy(s_last_msg, new_msg, sizeof(s_last_msg));
 
             /* Update stats + display */

@@ -9,6 +9,8 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_random.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 #include "nimble/ble.h"
 #include "host/ble_hs.h"
 #include "host/ble_uuid.h"
@@ -139,12 +141,8 @@ static void start_advertising(void)
         ESP_LOGI(TAG, "device name: '%s' (len=%d)", name, rsp.name_len);
     }
 
-    uint8_t own_addr_type;
-    rc = ble_hs_id_infer_auto(0, &own_addr_type);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "ble_hs_id_infer_auto: %d", rc);
-        return;
-    }
+    /* Use random static address (set in ensure_random_static_addr via sync_cb) */
+    uint8_t own_addr_type = BLE_OWN_ADDR_RANDOM;
 
     struct ble_gap_adv_params adv_params = {0};
     adv_params.conn_mode  = BLE_GAP_CONN_MODE_UND;
@@ -387,12 +385,54 @@ static void ble_host_task(void *param)
     nimble_port_freertos_deinit();
 }
 
+/* ── Persistent random static BLE address ────────────────────────────────
+ * Stored in NVS so it survives normal reflash (app-only flash preserves NVS).
+ * When NVS is erased (e.g. idf.py erase-flash), a new address is generated.
+ * macOS sees a different BLE address → treats it as a new device → no stale
+ * LTK conflict, fresh pairing happens automatically without "forget device".
+ * ──────────────────────────────────────────────────────────────────────── */
+#define BLE_ADDR_NVS_NS   "ble_addr"
+#define BLE_ADDR_NVS_KEY  "rand_addr"
+
+static void ensure_random_static_addr(void)
+{
+    uint8_t addr[6] = {0};
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(BLE_ADDR_NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "nvs_open failed (%s), using chip MAC", esp_err_to_name(err));
+        ble_hs_util_ensure_addr(0);
+        return;
+    }
+
+    size_t len = sizeof(addr);
+    err = nvs_get_blob(h, BLE_ADDR_NVS_KEY, addr, &len);
+    if (err == ESP_OK && len == 6) {
+        /* Address found in NVS — use it */
+        ESP_LOGI(TAG, "BLE addr from NVS: %02X:%02X:%02X:%02X:%02X:%02X",
+                 addr[5], addr[4], addr[3], addr[2], addr[1], addr[0]);
+    } else {
+        /* NVS was erased or first boot — generate a new random static address.
+         * BLE spec: top 2 bits of byte[5] (MSB) must be 11 for static random. */
+        esp_fill_random(addr, sizeof(addr));
+        addr[5] |= 0xC0;   /* set top 2 bits → static random */
+        err = nvs_set_blob(h, BLE_ADDR_NVS_KEY, addr, sizeof(addr));
+        if (err == ESP_OK) nvs_commit(h);
+        ESP_LOGI(TAG, "BLE addr generated: %02X:%02X:%02X:%02X:%02X:%02X",
+                 addr[5], addr[4], addr[3], addr[2], addr[1], addr[0]);
+    }
+    nvs_close(h);
+
+    int rc = ble_hs_id_set_rnd(addr);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_hs_id_set_rnd: %d — falling back to public addr", rc);
+        ble_hs_util_ensure_addr(0);
+    }
+}
+
 static void ble_hs_sync_cb(void)
 {
-    int rc = ble_hs_util_ensure_addr(0);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "ensure addr failed: %d", rc);
-    }
+    ensure_random_static_addr();
     /* NimBLE assigns GATT handles during host startup, before sync_cb fires.
      * Copy them here — copying earlier (in ble_tp_start) reads 0s. */
     if (s_ctx) {

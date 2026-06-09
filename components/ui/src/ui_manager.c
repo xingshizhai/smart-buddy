@@ -133,6 +133,7 @@ static bool      s_transcript_visible = true;
 /* Screen-off control */
 static uint8_t   s_saved_brightness = 100;
 static bool      s_screen_dimmed    = false;
+static lv_obj_t *s_wake_guard       = NULL;  /* fullscreen touch-catcher on lv_layer_top() */
 
 /* Status screen live labels */
 static lv_obj_t *s_status_tokens     = NULL;
@@ -159,6 +160,44 @@ static void persona_frame_cb(const char *frame, void *ctx)
         lv_label_set_text(s_persona_label, frame);
 }
 
+/* ── Wake-guard: transparent fullscreen object on lv_layer_top() ─────────
+ * Created whenever the screen dims or goes dark.  Any touch wakes the
+ * display and removes the guard; subsequent touches reach normal widgets.
+ * ───────────────────────────────────────────────────────────────────────── */
+static void wake_guard_cb(lv_event_t *e)
+{
+    (void)e;
+    extern hal_handles_t g_hal;
+    if (g_hal.display)
+        g_hal.display->backlight_set(g_hal.display, s_saved_brightness);
+    s_screen_dimmed = false;
+
+    /* Reset the screen-off timer to its initial dim phase */
+    if (s_screenoff_timer) {
+        lv_timer_set_period(s_screenoff_timer, (uint32_t)CONFIG_UI_SCREEN_OFF_TIMEOUT_S * 1000);
+        lv_timer_set_repeat_count(s_screenoff_timer, 1);
+        lv_timer_reset(s_screenoff_timer);
+    }
+
+    /* Remove the guard — normal touches can now reach their targets */
+    if (s_wake_guard) {
+        lv_obj_del(s_wake_guard);
+        s_wake_guard = NULL;
+    }
+}
+
+static void wake_guard_show(void)
+{
+    if (s_wake_guard) return;  /* already shown */
+    lv_obj_t *guard = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(guard, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_opa(guard, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(guard, 0, 0);
+    lv_obj_clear_flag(guard, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(guard, wake_guard_cb, LV_EVENT_PRESSED, NULL);
+    s_wake_guard = guard;
+}
+
 static void screenoff_timer_cb(lv_timer_t *t)
 {
     /* Don't turn off during approval */
@@ -169,9 +208,10 @@ static void screenoff_timer_cb(lv_timer_t *t)
 
     if (!s_screen_dimmed) {
         /* First timeout: dim to 20% */
-        g_hal.display->backlight_set(g_hal.display, 20);
         s_saved_brightness = 100; /* remember previous level */
+        g_hal.display->backlight_set(g_hal.display, 20);
         s_screen_dimmed = true;
+        wake_guard_show();
         /* Restart timer for next phase (full off) */
         if (s_screenoff_timer) {
             lv_timer_set_period(s_screenoff_timer,
@@ -182,6 +222,7 @@ static void screenoff_timer_cb(lv_timer_t *t)
     } else {
         /* Second timeout: turn off completely */
         g_hal.display->backlight_set(g_hal.display, 0);
+        /* Guard is already present from the dim phase */
     }
 }
 
@@ -772,11 +813,12 @@ static void notify_screen_lifecycle(ui_screen_id_t leaving, ui_screen_id_t enter
         if (g_hal.display)
             g_hal.display->backlight_set(g_hal.display, s_saved_brightness);
         s_screen_dimmed = false;
+        if (s_wake_guard) { lv_obj_del(s_wake_guard); s_wake_guard = NULL; }
         /* Reset timer to dim phase */
         if (s_screenoff_timer) {
-            lv_timer_set_period(s_screenoff_timer, 15000);
+            lv_timer_set_period(s_screenoff_timer, (uint32_t)CONFIG_UI_SCREEN_OFF_TIMEOUT_S * 1000);
             lv_timer_set_repeat_count(s_screenoff_timer, 1);
-            lv_timer_pause(s_screenoff_timer);
+            lv_timer_reset(s_screenoff_timer);
         }
     }
 }

@@ -95,6 +95,29 @@ static const ble_uuid128_t nus_rx_uuid = {
 
 /* ── Advertising ────────────────────────────────────────────────────── */
 
+/* Duration (ms) of Low Duty Cycle Directed Advertising before falling back
+ * to undirected.  10 s is enough for the Central to wake and connect. */
+#define DIRECTED_ADV_DURATION_MS  10000
+
+/* Set to true once directed adv has timed out; cleared on connect/disconnect
+ * so subsequent disconnects trigger a fresh directed-adv phase. */
+static bool s_directed_adv_done = false;
+
+/* Try to retrieve the first bonded peer's address.
+ * Returns true and fills *out_addr if a bond is found, false otherwise. */
+static bool get_bonded_peer(ble_addr_t *out_addr)
+{
+    struct ble_store_key_sec key = {0};
+    struct ble_store_value_sec val = {0};
+    key.peer_addr = *BLE_ADDR_ANY;   /* BLE_ADDR_ANY = "don't key off peer" → first bond */
+    key.idx = 0;
+    int rc = ble_store_read_our_sec(&key, &val);
+    if (rc != 0) return false;                /* no bond */
+    if (!val.ltk_present) return false;       /* not a full bond */
+    *out_addr = val.peer_addr;
+    return true;
+}
+
 static void start_advertising(void)
 {
     struct ble_hs_adv_fields fields;
@@ -144,6 +167,36 @@ static void start_advertising(void)
     /* Use random static address (set in ensure_random_static_addr via sync_cb) */
     uint8_t own_addr_type = BLE_OWN_ADDR_RANDOM;
 
+    /* ── Directed advertising for fast reconnect ──────────────────────────
+     * If we have a stored bond, first send Low Duty Cycle Directed Advertising
+     * to the bonded peer.  The macOS BLE controller handles directed adv at
+     * the controller layer — it reconnects immediately without requiring the
+     * Central app (Claude Desktop) to call connect() explicitly.
+     * Duration: DIRECTED_ADV_DURATION_MS ms; then ADV_COMPLETE fires and we
+     * fall back to undirected advertising so new peers can pair too.
+     * ──────────────────────────────────────────────────────────────────── */
+    ble_addr_t bonded_peer;
+    if (!s_directed_adv_done && get_bonded_peer(&bonded_peer)) {
+        struct ble_gap_adv_params dir_params = {0};
+        dir_params.conn_mode    = BLE_GAP_CONN_MODE_DIR;
+        dir_params.disc_mode    = BLE_GAP_DISC_MODE_GEN;
+        dir_params.high_duty_cycle = 0;   /* Low Duty Cycle — no 1.28 s limit */
+        /* BLE spec default LDC directed adv interval: ~250 ms */
+        dir_params.itvl_min = BLE_GAP_ADV_ITVL_MS(250);
+        dir_params.itvl_max = BLE_GAP_ADV_ITVL_MS(250);
+
+        rc = ble_gap_adv_start(own_addr_type, &bonded_peer, DIRECTED_ADV_DURATION_MS,
+                               &dir_params, ble_gap_event_cb, NULL);
+        if (rc == 0) {
+            ESP_LOGI(TAG, "directed adv → peer %02X:%02X:%02X:%02X:%02X:%02X (%d ms)",
+                     bonded_peer.val[5], bonded_peer.val[4], bonded_peer.val[3],
+                     bonded_peer.val[2], bonded_peer.val[1], bonded_peer.val[0],
+                     DIRECTED_ADV_DURATION_MS);
+            return;
+        }
+        ESP_LOGW(TAG, "directed adv start failed rc=%d, falling through to undirected", rc);
+    }
+
     struct ble_gap_adv_params adv_params = {0};
     adv_params.conn_mode  = BLE_GAP_CONN_MODE_UND;
     adv_params.disc_mode  = BLE_GAP_DISC_MODE_GEN;
@@ -169,6 +222,7 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
         if (event->connect.status == 0) {
             s_ctx->conn_handle = event->connect.conn_handle;
             s_ctx->state = TRANSPORT_STATE_CONNECTED;
+            s_directed_adv_done = false;   /* reset so next disconnect gets a directed phase */
             s_ctx->secure = false;
             s_ctx->cccd_subscribed = false;
             s_passkey = 0;
@@ -198,6 +252,7 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
         s_ctx->secure = false;
         s_ctx->cccd_subscribed = false;
         s_passkey = 0;
+        s_directed_adv_done = false;   /* allow directed phase for next reconnect */
         /* Use deferred callback (same as CONNECT) to keep NimBLE host task
          * stack clear of agent_core → state_machine call chains. */
         fire_state_cb_async(TRANSPORT_ID_BLE, TRANSPORT_STATE_DISCONNECTED,
@@ -206,7 +261,14 @@ static int ble_gap_event_cb(struct ble_gap_event *event, void *arg)
         return 0;
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
-        ESP_LOGI(TAG, "adv complete, restarting");
+        /* If directed adv timed out (not yet done), mark done and fall back
+         * to undirected so that new peers can also discover and pair. */
+        if (!s_directed_adv_done) {
+            ESP_LOGI(TAG, "directed adv timed out — switching to undirected");
+            s_directed_adv_done = true;
+        } else {
+            ESP_LOGI(TAG, "adv complete, restarting");
+        }
         start_advertising();
         return 0;
 

@@ -10,6 +10,11 @@ CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
 
+# Move large statically-allocated .bss buffers into PSRAM to free up
+# internal RAM — needed once BLE + Wi-Fi + LVGL display buffers + the
+# debug screenshot buffer all run concurrently.
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
 CONFIG_MAIN_TASK_STACK_SIZE=8192
 
@@ -49,6 +54,9 @@ CONFIG_LV_FONT_MONTSERRAT_16=y
 CONFIG_LV_FONT_MONTSERRAT_24=y
 CONFIG_LV_FONT_UNSCII_8=y
 # CONFIG_LV_FONT_SOURCE_HAN_SANS_SC_14_CJK is not set
+
+# Enable LVGL snapshot API for debug screenshot tool
+CONFIG_LV_USE_SNAPSHOT=y
 
 CONFIG_TRANSPORT_BLE_ENABLED=y
 # CONFIG_TRANSPORT_WS_ENABLED is not set

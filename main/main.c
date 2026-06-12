@@ -21,6 +21,8 @@
 #include "ui/ui_button_router.h"
 #include "app_config.h"
 #include "app_notify.h"
+#include "wifi_manager.h"
+#include "debug_screenshot.h"
 
 #define TAG "MAIN"
 
@@ -148,7 +150,7 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     esp_event_loop_create_default();
 
-    /* 2. Storage (NVS) — must be first */
+    /* 2. Storage (NVS) — must be first; Wi-Fi requires NVS to be initialized */
     ESP_ERROR_CHECK(hal_storage_init());
 
     /* 3. Hardware init */
@@ -182,6 +184,12 @@ void app_main(void)
     ui_fonts_init();
     ESP_ERROR_CHECK(ui_manager_init());
     ui_manager_show(UI_SCREEN_BOOT, UI_ANIM_NONE);
+
+    /* Wi-Fi + debug screenshot server start after the display/LVGL buffers
+     * (internal RAM) are allocated, since the Wi-Fi driver's RX/TX buffers
+     * also compete for internal RAM. */
+    ESP_ERROR_CHECK(wifi_manager_start());
+    ESP_ERROR_CHECK(debug_screenshot_start());
 
     /* 5. State machine */
     ESP_ERROR_CHECK(sm_create(&s_sm));

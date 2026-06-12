@@ -191,15 +191,22 @@ esp_err_t audio_manager_init(hal_audio_t *audio)
 
 esp_err_t audio_manager_start(void)
 {
-    BaseType_t r;
+    /* Stacks live in PSRAM to avoid exhausting internal RAM, which is
+     * heavily contended by WiFi + BLE + LVGL display buffers. The TCBs
+     * themselves must stay in internal RAM. */
+    static StaticTask_t s_record_tcb, s_play_tcb;
 
-    r = xTaskCreatePinnedToCore(record_task, "audio_rec",
-                                 4096, NULL, 7, &s_record_task, 1);
-    if (r != pdPASS) return ESP_FAIL;
+    StackType_t *record_stack = heap_caps_malloc(4096 * sizeof(StackType_t), MALLOC_CAP_SPIRAM);
+    if (!record_stack) return ESP_ERR_NO_MEM;
+    s_record_task = xTaskCreateStaticPinnedToCore(record_task, "audio_rec",
+                                                    4096, NULL, 7, record_stack, &s_record_tcb, 1);
+    if (!s_record_task) return ESP_FAIL;
 
-    r = xTaskCreatePinnedToCore(play_task, "audio_play",
-                                 4096, NULL, 7, &s_play_task, 1);
-    if (r != pdPASS) return ESP_FAIL;
+    StackType_t *play_stack = heap_caps_malloc(4096 * sizeof(StackType_t), MALLOC_CAP_SPIRAM);
+    if (!play_stack) return ESP_ERR_NO_MEM;
+    s_play_task = xTaskCreateStaticPinnedToCore(play_task, "audio_play",
+                                                  4096, NULL, 7, play_stack, &s_play_tcb, 1);
+    if (!s_play_task) return ESP_FAIL;
 
     return ESP_OK;
 }

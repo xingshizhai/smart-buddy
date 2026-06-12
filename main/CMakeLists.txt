@@ -10,6 +10,8 @@ idf_component_register(
         imu_monitor
         audio_manager
         ui
+        wifi_manager
+        debug_screenshot
         nvs_flash
         esp_event
         esp_netif

@@ -21,3 +21,6 @@ __pycache__/
 
 # Clangd / LSP cache
 .cache/
+
+# Debug screenshot output
+tools/screenshot/screenshots/

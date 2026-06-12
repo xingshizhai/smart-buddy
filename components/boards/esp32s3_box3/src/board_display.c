@@ -63,7 +63,7 @@ esp_err_t hal_display_create(const hal_display_cfg_t *cfg, hal_display_t **out)
         },
         .flags = {
             .buff_dma    = true,
-            .buff_spiram = false,
+            .buff_spiram = true,
             .swap_bytes  = (BSP_LCD_BIGENDIAN ? true : false),
         },
     };

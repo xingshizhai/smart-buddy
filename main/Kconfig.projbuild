@@ -92,6 +92,23 @@ menu "Smart-Buddy Configuration"
 
     endmenu
 
+    menu "Debug"
+
+        config DEBUG_SCREENSHOT_ENABLED
+            bool "Enable on-demand LVGL screenshot server (Wi-Fi)"
+            default n
+            help
+                Runs a small TCP server that, on request from a PC tool,
+                captures the current LVGL screen via lv_snapshot and sends
+                it as raw RGB565 pixels. Requires Wi-Fi (SB_WIFI_SSID).
+
+        config DEBUG_SCREENSHOT_PORT
+            int "Screenshot server TCP port"
+            default 3333
+            depends on DEBUG_SCREENSHOT_ENABLED
+
+    endmenu
+
     menu "IMU Gestures"
 
         config IMU_SHAKE_THRESHOLD_MG

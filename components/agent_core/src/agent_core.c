@@ -5,6 +5,7 @@
 #include "freertos/queue.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include "agent_core.h"
 #include "agent_stats.h"
 #include "state_machine.h"
@@ -342,10 +343,17 @@ esp_err_t agent_core_init(sm_handle_t sm)
 
 esp_err_t agent_core_start(void)
 {
-    BaseType_t r = xTaskCreatePinnedToCore(agent_task, "agent_core",
+    /* Stack lives in PSRAM to avoid exhausting internal RAM, which is
+     * heavily contended by WiFi + BLE + LVGL display buffers. The TCB
+     * itself must stay in internal RAM. */
+    static StaticTask_t s_tcb;
+    StackType_t *stack = heap_caps_malloc(TASK_STACK * sizeof(StackType_t), MALLOC_CAP_SPIRAM);
+    if (!stack) return ESP_ERR_NO_MEM;
+
+    s_task = xTaskCreateStaticPinnedToCore(agent_task, "agent_core",
                                             TASK_STACK, NULL, TASK_PRIO,
-                                            &s_task, 0);
-    return r == pdPASS ? ESP_OK : ESP_FAIL;
+                                            stack, &s_tcb, 0);
+    return s_task ? ESP_OK : ESP_FAIL;
 }
 
 esp_err_t agent_core_stop(void)
